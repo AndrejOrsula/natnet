@@ -1,0 +1,30 @@
+[package]
+name = "natnet-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+natnet = { path = "..", features = ["imagery"] }
+
+# Kept out of the crate's own workspace; run with `cargo +nightly fuzz run <target>`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "imagery"
+path = "fuzz_targets/imagery.rs"
+test = false
+doc = false
+bench = false

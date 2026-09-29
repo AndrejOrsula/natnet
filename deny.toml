@@ -1,0 +1,42 @@
+# cargo-deny configuration for the `natnet` crate.
+#
+# Trimmed to this crate's tiny surface: a zero-dependency sans-io core, with
+# `serde` and `nalgebra` behind optional features.
+
+[graph]
+targets = [
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "i686-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+[advisories]
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+skip = []
+skip-tree = []
+
+[licenses]
+private = { ignore = true }
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",     # https://spdx.org/licenses/Apache-2.0.html
+    "MIT",            # https://spdx.org/licenses/MIT.html
+    "Unicode-3.0",    # https://spdx.org/licenses/Unicode-3.0.html
+    "Zlib",           # https://spdx.org/licenses/Zlib.html
+]
+exceptions = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

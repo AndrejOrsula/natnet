@@ -1,0 +1,389 @@
+name: Rust
+
+# Gates: fmt + clippy(-D warnings) + test (all features and default) + a
+# `net`-feature build + cargo-deny. `natnet` is a pure-Rust,
+# dependency-light protocol crate, so there are no GPU or wasm jobs.
+#
+# The `gate` job covers the default and all-feature endpoints. The `features`
+# job keeps the focused lint/test rows for each optional feature and the
+# imagery/net transport combination. The `feature-docs` job covers every one
+# of the 16 combinations of the four independent flags. Its empty feature
+# value is handled by an explicit shell branch rather than interpolating an
+# empty `--features` argument.
+
+on:
+  push:
+    branches:
+      - main
+      # `dev` is this repository's default branch and where every commit of it
+      # has ever landed; `main` has received none. Triggering on `main` alone
+      # meant this workflow was registered, active, and had never run once —
+      # a green-by-vacancy that looked identical to a green suite. Added after
+      # the eighteen steps below were run over this tree by hand, all rc 0, so
+      # that enabling the trigger reports a result rather than discovers one.
+      - dev
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: "${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MSRV: "1.92"
+  I686_TARGET: i686-unknown-linux-gnu
+  CARGO_TERM_COLOR: always
+  # Pinned because the `deny` job below installs the binary rather than
+  # running EmbarkStudios/cargo-deny-action, which is a Docker action
+  # (`runs: using: "docker"`, `image: "Dockerfile"`) and so cannot run on the
+  # self-hosted fleet: the runner user has no access to the Docker socket.
+  # The digest is upstream's own published `.sha256` for this asset.
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  # Fixed published version; installed with stable because this is a CI tool,
+  # not part of the crate's Rust 1.92 MSRV surface.
+  CARGO_MACHETE_VERSION: "0.9.2"
+
+jobs:
+  gate:
+    # The SpaceRL self-hosted runners (six, Default group, all labelled
+    # `self-hosted Linux X64 ubuntu-latest`). Named explicitly because
+    # `runs-on: ubuntu-latest` alone resolves to a GitHub-hosted runner even
+    # when a self-hosted one carries that label, so the fleet sat idle while
+    # hosted minutes were billed.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: ${{ env.MSRV }}
+          components: clippy, rustfmt
+
+      # `rust-toolchain.toml` pins channel `stable`, and that file wins for
+      # every in-repo cargo invocation — so `stable`, not the MSRV above, is
+      # the toolchain that actually runs every step below, and the one that
+      # has to carry the components. A GitHub-hosted runner ships `stable`
+      # with them preinstalled, which is why this was never needed while this
+      # workflow ran there; a self-hosted runner may have a bare `stable`.
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: record stable toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: cargo test (all features)
+        run: cargo test --locked --all-features
+
+      - name: cargo test (no features)
+        run: cargo test --locked
+
+      - name: cargo build (net feature)
+        run: cargo build --locked --features net
+
+      - name: cargo doc (no features)
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: cargo doc (all features)
+        run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: build imagery example
+        run: cargo build --locked --features imagery,net --example imagery_dump
+
+      - name: record MSRV toolchain
+        run: |
+          rustc +${{ env.MSRV }} --version --verbose
+          cargo +${{ env.MSRV }} --version --verbose
+
+      # `rust-toolchain.toml` selects stable for ordinary invocations. The
+      # explicit cargo selector below is the MSRV gate and cannot be overridden
+      # by that repository file.
+      - name: cargo test (MSRV ${{ env.MSRV }}, no features)
+        run: cargo +${{ env.MSRV }} test --locked
+
+      - name: cargo test (MSRV ${{ env.MSRV }}, all features)
+        run: cargo +${{ env.MSRV }} test --locked --all-features
+
+  i686:
+    name: i686 compile
+    # This is compile/config coverage only. Runtime tests need an equipped
+    # 32-bit linker/runtime and stay external.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # `rust-toolchain.toml` pins channel `stable`; attach the target to that
+      # same toolchain because every unqualified Cargo command below selects it.
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: stable
+          targets: ${{ env.I686_TARGET }}
+
+      - name: verify i686 target wiring
+        env:
+          TARGET: ${{ env.I686_TARGET }}
+        run: |
+          set -euo pipefail
+
+          check_target_wiring() {
+            local workflow_file="$1"
+            local deny_file="$2"
+            local target="$3"
+            local workflow_target_expr
+            local installed_count
+            local deny_count
+
+            # Build the expression at runtime so this validator can inspect
+            # the checked-in workflow without GitHub expanding its pattern.
+            workflow_target_expr="$(printf '%s' '$'){{ env.I686_TARGET }}"
+            installed_count="$(rustup target list --toolchain stable --installed | grep -Fxc "$target" || true)"
+            deny_count="$(grep -Fxc "    { triple = \"$target\" }," "$deny_file" || true)"
+            test "$installed_count" = 1 || return 1
+            test "$deny_count" = 1 || return 1
+            grep -Fqx "          targets: $workflow_target_expr" "$workflow_file" || return 1
+            grep -Fq -- "--target $workflow_target_expr" "$workflow_file" || return 1
+          }
+
+          check_target_wiring .github/workflows/rust.yml deny.toml "$TARGET"
+
+          # Negative control: a deny graph with a different target must not
+          # pass the same install/check/deny contract.
+          mismatched_deny="$RUNNER_TEMP/deny-mismatch.toml"
+          sed "s|{ triple = \"$TARGET\" }|{ triple = \"mismatch-target\" }|" \
+            deny.toml > "$mismatched_deny"
+          if check_target_wiring .github/workflows/rust.yml "$mismatched_deny" "$TARGET"; then
+            echo "target mismatch was accepted" >&2
+            exit 1
+          fi
+
+      - name: cargo check (i686)
+        run: cargo check --locked --all-targets --all-features --target ${{ env.I686_TARGET }}
+
+  features:
+    name: features (${{ matrix.features }})
+    # The SpaceRL self-hosted runners (six, Default group, all labelled
+    # `self-hosted Linux X64 ubuntu-latest`). Named explicitly because
+    # `runs-on: ubuntu-latest` alone resolves to a GitHub-hosted runner even
+    # when a self-hosted one carries that label, so the fleet sat idle while
+    # hosted minutes were billed.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - imagery
+          - net
+          - serde
+          - nalgebra
+          - imagery,net
+          - serde,nalgebra
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: ${{ env.MSRV }}
+          components: clippy
+
+      # `rust-toolchain.toml` pins channel `stable`, and that file wins for
+      # every in-repo cargo invocation — so `stable`, not the MSRV above, is
+      # the toolchain that actually runs every step below, and the one that
+      # has to carry the components. A GitHub-hosted runner ships `stable`
+      # with them preinstalled, which is why this was never needed while this
+      # workflow ran there; a self-hosted runner may have a bare `stable`.
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets --features ${{ matrix.features }} -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked --features ${{ matrix.features }}
+
+  feature-docs:
+    name: feature docs (${{ matrix.name }})
+    # Every row is a compile and strict-rustdoc check. Keep this separate from
+    # the focused runtime matrix so a new optional cfg cannot hide behind
+    # `--all-features` success.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            features: ""
+          - name: imagery
+            features: imagery
+          - name: net
+            features: net
+          - name: serde
+            features: serde
+          - name: nalgebra
+            features: nalgebra
+          - name: imagery-net
+            features: imagery,net
+          - name: imagery-serde
+            features: imagery,serde
+          - name: imagery-nalgebra
+            features: imagery,nalgebra
+          - name: net-serde
+            features: net,serde
+          - name: net-nalgebra
+            features: net,nalgebra
+          - name: serde-nalgebra
+            features: serde,nalgebra
+          - name: imagery-net-serde
+            features: imagery,net,serde
+          - name: imagery-net-nalgebra
+            features: imagery,net,nalgebra
+          - name: imagery-serde-nalgebra
+            features: imagery,serde,nalgebra
+          - name: net-serde-nalgebra
+            features: net,serde,nalgebra
+          - name: all
+            features: imagery,net,serde,nalgebra
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: cargo check (${{ matrix.name }})
+        env:
+          FEATURE_SET: ${{ matrix.features }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$FEATURE_SET" ]]; then
+            cargo check --locked --all-targets --no-default-features --features "$FEATURE_SET"
+          else
+            cargo check --locked --all-targets --no-default-features
+          fi
+
+      - name: cargo doc (${{ matrix.name }})
+        env:
+          FEATURE_SET: ${{ matrix.features }}
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          if [[ -n "$FEATURE_SET" ]]; then
+            cargo doc --locked --no-deps --no-default-features --features "$FEATURE_SET"
+          else
+            cargo doc --locked --no-deps --no-default-features
+          fi
+
+  deny:
+    # The SpaceRL self-hosted runners (six, Default group, all labelled
+    # `self-hosted Linux X64 ubuntu-latest`). Named explicitly because
+    # `runs-on: ubuntu-latest` alone resolves to a GitHub-hosted runner even
+    # when a self-hosted one carries that label, so the fleet sat idle while
+    # hosted minutes were billed.
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The Docker action this job used to call bundled its own toolchain.
+      # `cargo-deny` shells out to `cargo metadata`, so once the container is
+      # gone the job has to bring a toolchain of its own; `rust-toolchain.toml`
+      # then selects `stable`, so both have to exist.
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, 2026-09-03
+        with:
+          toolchain: stable
+
+      # Not EmbarkStudios/cargo-deny-action: it is a Docker action
+      # (`runs: using: "docker"`, `image: "Dockerfile"`), so it builds and runs
+      # a container on the runner. The self-hosted fleet's runner user cannot
+      # reach the Docker socket, so the action fails there before cargo-deny
+      # runs at all.
+      - name: install cargo-deny ${{ env.CARGO_DENY_VERSION }}
+        run: |
+          set -euo pipefail
+          asset="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${asset}"
+          curl -sSfL --retry 3 "$url" -o "$RUNNER_TEMP/$asset"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$asset" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/deny-bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/deny-bin" --strip-components=1
+          "$RUNNER_TEMP/deny-bin/cargo-deny" --version
+          echo "$RUNNER_TEMP/deny-bin" >> "$GITHUB_PATH"
+
+      - name: refresh RustSec advisory database
+        run: cargo-deny fetch db
+
+      - name: record RustSec advisory database identity
+        run: |
+          set -euo pipefail
+          cargo_home_dir="${CARGO_HOME:-$HOME/.cargo}"
+          shopt -s nullglob
+          advisory_dbs=("$cargo_home_dir"/advisory-dbs/advisory-db-*)
+          if (( ${#advisory_dbs[@]} == 0 )); then
+            echo "cargo-deny did not provision a RustSec advisory database" >&2
+            exit 1
+          fi
+          for advisory_db in "${advisory_dbs[@]}"; do
+            if [[ -d "$advisory_db/.git" ]]; then
+              git -C "$advisory_db" log -1 --format='RustSec advisory DB %H %cI'
+            fi
+          done
+
+      - name: cargo deny
+        # `--all-features` because that is what the action supplied by default
+        # (`arguments: "--all-features"` in its `action.yml`), and dropping it
+        # while replacing the action would have narrowed the check silently.
+        # Measured on both repositories: the verdict is identical either way,
+        # because `cargo metadata` resolves optional dependencies regardless of
+        # features. Parity restored rather than a defect repaired.
+        run: cargo-deny --locked --all-features --manifest-path Cargo.toml check advisories bans licenses sources
+
+      - name: install cargo-machete ${{ env.CARGO_MACHETE_VERSION }}
+        run: |
+          set -euo pipefail
+          install_root="$RUNNER_TEMP/cargo-machete"
+          cargo +stable install --locked --force --version "$CARGO_MACHETE_VERSION" \
+            --root "$install_root" cargo-machete
+          "$install_root/bin/cargo-machete" --version
+
+      - name: cargo machete
+        run: |
+          "$RUNNER_TEMP/cargo-machete/bin/cargo-machete"
