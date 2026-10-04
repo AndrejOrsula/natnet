@@ -1,4 +1,4 @@
-//! Message ids, fire-and-forget command datagrams and NAT_MESSAGESTRING text.
+//! Message ids, command datagrams, and NAT_MESSAGESTRING parsing contracts.
 #![allow(
     clippy::expect_used,
     reason = "test failures should name the violated expectation"
@@ -12,7 +12,7 @@ use natnet::{
     NAT_SERVERINFO, NAT_UNRECOGNIZED_REQUEST, parse_message_string,
 };
 
-/// The ids `NatNetTypes.h` (NatNet SDK 4.1.0.0) defines, in order.
+/// The SDK message ID constants in wire order.
 #[test]
 fn message_ids_match_the_sdk_header() {
     let ids = [

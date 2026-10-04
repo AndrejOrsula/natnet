@@ -522,7 +522,9 @@ fn tier1_failure_retains_completed_progress() {
             assert_eq!(progress[0].target(), "cam-1");
             assert_eq!(progress[0].reread(), "1");
         }
-        other => panic!("expected second-target status failure, got {other:?}"),
+        other @ Tier1ExecutionError::UnknownRemoteOutcome { .. } => {
+            panic!("expected second-target status failure, got {other:?}")
+        }
     }
     assert_eq!(error.progress().len(), 1);
 }

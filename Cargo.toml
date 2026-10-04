@@ -1,6 +1,6 @@
 [package]
 name = "natnet"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "Apache-2.0 OR MIT"
@@ -25,16 +25,8 @@ default = []
 # validated command exchanges, and an explicitly unrestricted raw client.
 # Local interfaces and multicast joins are explicit.
 net = []
-# The AUGI/1 imagery side-channel receive side (`imagery` module): sans-io,
-# zero new dependencies, decodes no codec. Default off — NatNet itself carries
-# no imagery, so a plain NatNet consumer never pays for this. Combined with
-# `net` it also builds `imagery::net::ImageClient` (std TCP).
 imagery = []
-# `serde::{Serialize, Deserialize}` derives on core value models; not Message,
-# MessageHeader, command authorization state or borrowed imagery records.
 serde = ["dep:serde"]
-# One-way conversions from plain-array poses/markers to `nalgebra` values.
-# No normalization, reverse conversion or coordinate transformation.
 nalgebra = ["dep:nalgebra"]
 
 [[example]]
@@ -47,29 +39,22 @@ required-features = ["net"]
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
 nalgebra = { version = "0.35", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
-# Token assertions for feature-gated serde contracts; no runtime core dependency.
 serde_test = "1.0.177"
 
 [lints.clippy]
-# Broad coverage first; protocol/wire-format exceptions override the group.
 pedantic = { level = "warn", priority = -1 }
 cast_possible_truncation = "allow"
 cast_possible_wrap = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 doc_markdown = "allow"
-elidable_lifetime_names = "allow"
-float_cmp = "allow"
-manual_let_else = "allow"
-many_single_char_names = "allow"
-match_wildcard_for_single_variants = "allow"
-no_effect_underscore_binding = "allow"
 redundant_closure_for_method_calls = "allow"
 
 # Production panic, placeholder, and UTF-8 slicing policy.

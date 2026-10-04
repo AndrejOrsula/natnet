@@ -1,4 +1,4 @@
-//! Command grammar, request ownership, and Tier-1 state-machine tests.
+//! Command grammar, request validation, replies, and write-state contracts.
 
 use std::panic::catch_unwind;
 
@@ -10,7 +10,7 @@ use natnet::command::{
 use natnet::serverinfo::ConnectionInfo;
 use natnet::{Error, NAT_CONNECT, NAT_REQUEST, NAT_REQUEST_MODELDEF, ServerInfo, Version};
 
-// Assertions shared by tests: malformed output must fail the test immediately.
+// Decode a validated command request for readable wire assertions.
 #[allow(clippy::expect_used)]
 fn command_string(request: &Request) -> String {
     let payload = &request.as_bytes()[4..];
@@ -31,7 +31,7 @@ fn value(value: &str) -> Vec<u8> {
 
 #[test]
 fn connect_options_use_the_sdk_layout() {
-    // The default hello is unchanged: a bare header.
+    // The default hello contains only the header.
     assert_eq!(
         command::connect_request().unwrap().as_bytes(),
         &[0, 0, 0, 0]
@@ -53,7 +53,7 @@ fn connect_options_use_the_sdk_layout() {
     assert_eq!(payload[269], 0);
     assert_eq!(ConnectOptions::parse(payload), Some(options));
 
-    // No version requested: 0.0.0.0, which Motive reads as its current one.
+    // A zero version requests the server's current bitstream.
     let current = command::connect_request_with(ConnectOptions::default()).unwrap();
     assert_eq!(&current.as_bytes()[4 + 264..], &[0; 6]);
     assert_eq!(
@@ -61,8 +61,7 @@ fn connect_options_use_the_sdk_layout() {
         Some(ConnectOptions::default())
     );
 
-    // The SDK Python sample's hello parses; a payload too short to hold the
-    // options, the default hello's among them, carries none.
+    // A payload shorter than the options block carries no options.
     let mut python = vec![0u8; 270];
     python[..4].copy_from_slice(b"Ping");
     python[265..269].copy_from_slice(&[4, 1, 0, 0]);
@@ -392,6 +391,7 @@ fn second_target_mismatch_retains_canary_progress() {
 }
 
 #[test]
+// Shows four-byte payloads can parse as status or request-context values.
 fn response_decoder_keeps_four_byte_ambiguity_documented() {
     for (text, status) in [("abc", 6_513_249), ("1.0", 3_157_553), ("yes", 7_562_617)] {
         let reply = CommandResponse::value_datagram(text);

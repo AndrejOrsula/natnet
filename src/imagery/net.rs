@@ -1,100 +1,35 @@
-//! Optional std-TCP transport for AUGI/1 (`imagery` + `net` features) — a
-//! thin convenience layer over the sans-io [`imagery`](crate::imagery) core.
+//! std TCP client for AUGI/1 (`imagery` + `net` features).
 //!
-//! # This client connects out. That is a deliberate departure.
+//! 1. Dial with [`ImageClient::connect`], or adopt an accepted stream with
+//!    [`ImageClient::from_stream`].
+//! 2. Call [`ImageClient::recv_record`] in a loop and parse each record with
+//!    [`parse_record`](crate::imagery::parse_record).
 //!
-//! [`DataClient`](crate::net::DataClient) is type-enforced receive-only: the
-//! only wire output a NatNet data subscription can cause is the kernel's IGMP
-//! membership report. [`ImageClient::connect`] breaks that posture — it opens
-//! an outbound TCP connection and the three-way handshake is unambiguously
-//! transmitted traffic.
+//! **Not authenticated.** `connect` dials any address you give it. After the
+//! handshake the client sends no application data. Choosing a safe peer is
+//! yours.
 //!
-//! The departure is justified because of **who is on the far end**. The
-//! transmit ban exists so that subscribing to a stream can never perturb the
-//! motion-capture system: nothing this crate sends may reach Motive's command
-//! port. An [`ImageClient`] connects to `motive-bridge`, a separate service
-//! on its own TCP port. It is not a command channel to Motive, it
-//! carries no NatNet command, and this type exposes no send method at all —
-//! once connected, it is as receive-only as [`DataClient`](crate::net::DataClient).
+//! `std` cannot bind before connecting, so `connect` checks the local address
+//! afterwards and fails with [`io::ErrorKind::AddrNotAvailable`] if it is not
+//! the requested interface. [`Ipv4Addr::UNSPECIFIED`] skips the check.
 //!
-//! [`ImageClient::from_stream`] avoids the departure entirely and is the
-//! preferred posture where the network allows it: the consumer listens and
-//! the bridge dials out (the bridge's `connect_to`/[`MODE_CONNECT`] mode,
-//! which also spares the Windows host an inbound firewall rule). The caller
-//! owns the listener and decides whether its first accepted peer is trusted;
-//! this transport performs no peer authentication.
+//! # Deadlines and records
 //!
-//! # Interface binding
+//! - Timeouts must be positive. One absolute deadline covers a whole record;
+//!   arriving bytes do not extend it.
+//! - Reads are non-blocking; an idle client polls with 50 µs to 1 ms backoff.
+//! - Past the deadline the client makes at most one more read for the prefix
+//!   and one for the body (up to 1 MiB), so data already queued can still
+//!   complete the record. Otherwise it fails with `TimedOut`.
+//! - Records over [`MAX_RECORD_LEN`] are refused. The buffer grows as data
+//!   arrives (at most 1 MiB ahead), never from the declared length.
 //!
-//! A dual-homed workstation's default route may be the wrong one.
-//! `std` has no bind-before-connect for TCP (that needs a raw socket API this
-//! zero-dependency crate will not take on), so [`ImageClient::connect`] connects
-//! and then **verifies** the kernel chose the requested source address, failing
-//! loudly rather than streaming down the wrong interface. Pass
-//! [`Ipv4Addr::UNSPECIFIED`] to skip the check.
-//!
-//! # Timeouts and failure lifecycle
-//!
-//! [`ImageClient::connect`] requires a positive connect timeout and uses
-//! `TcpStream::connect_timeout`. [`ImageClient::from_stream`] requires a
-//! positive record timeout argument and puts the adopted socket into the
-//! non-blocking mode the client relies on, whatever mode it inherited. Each
-//! [`ImageClient::recv_record`] call requires its own positive record timeout.
-//! The timeout is an **absolute deadline for the whole record**, including all
-//! prefix, header, and payload bytes; receiving a byte does not restart it,
-//! and a peer still sending when it passes does not buy more time with what it
-//! sends next.
-//!
-//! **Waiting never uses a socket receive timeout.** Every read is
-//! non-blocking; while nothing is queued the client sleeps for at most 1 ms
-//! (starting at 50 µs, doubling while idle) and polls again until the
-//! deadline. Microsoft documents for `SO_RCVTIMEO` that "if a blocking receive
-//! call times out, the connection is in an indeterminate state and should be
-//! closed", so a connection that is to survive an idle timeout cannot be
-//! bounded that way. The cost is up to one poll interval of added latency
-//! (longer where the platform's sleep granularity is coarser) and periodic
-//! wake-ups while a call waits.
-//!
-//! The deadline bounds *waiting*, not reading: once it has passed, what is
-//! left of the prefix or of the body is taken with a **single non-blocking
-//! read** of up to the larger of 1 MiB and the space already allocated for the
-//! record, so a record whose outstanding bytes are already queued and fit that
-//! read is delivered whatever its kind — including when the deadline falls
-//! between the read that collects the prefix and the read that collects the
-//! payload. A read returning fewer bytes than it asked for has emptied the
-//! receive queue, so a second read could only collect bytes that arrived after
-//! the deadline; there is no second read, and a peer cannot lengthen the call
-//! by continuing to send. A record whose remainder at the deadline is longer
-//! than that one read, or longer than the receive queue holds at once, is not
-//! completed late.
-//!
-//! **What a peer can make the client allocate is what it sends.** The declared
-//! record length is checked against [`MAX_RECORD_LEN`] and then used only as a
-//! bound: the destination buffer grows in chunks as bytes arrive (at least
-//! 64 KiB, at most doubling what has been received), and past the deadline by
-//! at most the 1 MiB final read. A twelve-byte prefix declaring 64 MiB costs
-//! at most that final read's zero-fill, never the declared length.
-//!
-//! A successful call returns `Ok(true)` and replaces the caller's buffer with
-//! one complete record. A clean close before any byte of the next prefix
-//! returns `Ok(false)` and leaves the caller's buffer unchanged. A deadline
-//! that passes before any byte of the next record has arrived returns
-//! [`io::ErrorKind::TimedOut`] **without** ending the session: the buffer is
-//! unchanged, [`ImageClient::is_terminal`] stays `false`, and the next call
-//! waits again. A partial close, framing error, length-cap violation, a
-//! timeout after any byte of a record was consumed, or other I/O error clears
-//! the incomplete buffer, records the failure, makes the client terminal and
-//! shuts down the connection. Further valid calls retain the error
-//! kind/message, NatNet error source or OS error code, and never read the
-//! stream; create a new client to reconnect. A `Bye` record is an ordinary
-//! successful record, so a caller can stop at it without confusing protocol
-//! shutdown with transport EOF. Record framing does not validate Hello
-//! ordering, bridge identity, camera dimensions, or codec semantics; the
-//! consumer owns those session checks. Zero or unrepresentable timeout
-//! arguments fail before reading and leave both the buffer and client state
-//! unchanged.
-//!
-//! [`MODE_CONNECT`]: crate::imagery::MODE_CONNECT
+//! `recv_record` returns `Ok(true)` for a record and `Ok(false)` for a clean
+//! EOF between records. A timeout before any byte of a record is an idle poll:
+//! the client stays usable. Any other failure (partial EOF, bad framing, a
+//! timeout mid-record, I/O errors) shuts the stream down; later calls return
+//! the same error. Framing does not check record order, bridge identity or
+//! image contents.
 
 use std::io::{self, ErrorKind, Read};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream};
@@ -105,9 +40,8 @@ use crate::imagery::{PREFIX_LEN, record_len};
 
 /// Largest record [`ImageClient::recv_record`] will buffer, in bytes.
 ///
-/// The wire allows a 4 GiB payload. A 640x512 Mono8 frame is 320 kB and a
-/// 33x33 ray grid is 26 kB, so 64 MiB is generous by two orders of magnitude
-/// while still refusing to allocate on a corrupt or hostile length.
+/// The wire permits 4 GiB payloads; this cap bounds memory use for received
+/// records.
 pub const MAX_RECORD_LEN: usize = 64 << 20;
 
 #[derive(Debug)]
@@ -184,9 +118,6 @@ impl ImageClient {
     /// The timeout bounds the connect only; each [`ImageClient::recv_record`]
     /// call supplies its own record timeout.
     ///
-    /// See the module docs for why this outbound connect is an accepted
-    /// departure from the crate's receive-only transmit posture.
-    ///
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::InvalidInput`] for a zero timeout, propagates
@@ -217,13 +148,9 @@ impl ImageClient {
 
     /// Adopts an already-connected stream.
     ///
-    /// This is the reverse-mode posture, where the consumer listens and the
-    /// bridge dials out. Nothing is transmitted by this constructor. The
-    /// stream is switched to non-blocking mode, which every
-    /// [`ImageClient::recv_record`] wait relies on (see the module docs), so
-    /// a socket that inherited either mode from its listener behaves the same.
-    /// `record_timeout` must be positive; it is validated for compatibility
-    /// and each receive call supplies its own deadline.
+    /// The consumer may listen and accept the bridge's connection. The stream
+    /// is switched to non-blocking mode. `record_timeout` must be positive;
+    /// each receive call supplies its own deadline.
     ///
     /// # Errors
     ///
@@ -249,12 +176,8 @@ impl ImageClient {
 
     /// Whether this client has entered its terminal state.
     ///
-    /// A terminal client (clean EOF, a partial record, a framing error, a
-    /// timeout after any byte of a record was consumed, or another I/O
-    /// failure) never reads the stream again; create a new client to
-    /// reconnect. An idle [`io::ErrorKind::TimedOut`] — the deadline passed
-    /// before any byte of the next record arrived — leaves this `false`, and
-    /// the next [`ImageClient::recv_record`] waits again.
+    /// Terminal clients never read again; create a new client to reconnect.
+    /// An idle [`io::ErrorKind::TimedOut`] leaves this `false`.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         self.terminal.is_some()
@@ -273,43 +196,23 @@ impl ImageClient {
     ///
     /// Returns `Ok(true)` for a complete record and `Ok(false)` for clean EOF
     /// before the next prefix byte. Clean EOF leaves `buf` unchanged. The
-    /// caller must supply a positive timeout for each operation; the deadline
-    /// covers the complete record and cannot be extended by fragmented or
-    /// slow delivery, nor by a peer still sending when it passes. Waiting is
-    /// non-blocking polling against that deadline (at most 1 ms between
-    /// polls); no socket receive timeout is used.
+    /// positive timeout is an absolute deadline for the entire record. Reads
+    /// poll non-blockingly; after the deadline, one read may consume bytes
+    /// already queued. A timeout before any record byte is read is nonterminal
+    /// and preserves `buf`; timeout within a record is terminal.
     ///
-    /// The deadline bounds *waiting*, not reading. Once it has passed, the
-    /// prefix and the body are each finished with a **single non-blocking
-    /// read** of what the receive queue already holds, sized to at least the
-    /// smaller of the record's remainder and 1 MiB. A record whose outstanding
-    /// bytes are all queued and fit that read is delivered, including when the
-    /// deadline falls between the prefix read and the payload read; a record
-    /// that read cannot finish fails with [`io::ErrorKind::TimedOut`].
-    ///
-    /// If the deadline passes before **any** byte of the next record has been
-    /// read, the call returns [`io::ErrorKind::TimedOut`] without ending the
-    /// session: `buf` is unchanged, [`ImageClient::is_terminal`] stays
-    /// `false`, and the caller may call again. A timeout after any byte of a
-    /// record was consumed is terminal, because the stream position is then
-    /// inside a record.
-    ///
-    /// The declared record length is capped by [`MAX_RECORD_LEN`] and never
-    /// allocated up front: `buf` grows in bounded chunks as bytes arrive.
+    /// The length is capped by [`MAX_RECORD_LEN`] and does not cause an
+    /// up-front allocation.
     ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::UnexpectedEof`] when EOF follows any prefix,
-    /// header, or payload byte. Returns [`io::ErrorKind::InvalidData`] for a
-    /// bad magic, impossible length, or a record longer than
-    /// [`MAX_RECORD_LEN`]. Returns [`io::ErrorKind::TimedOut`] for an idle
-    /// deadline (not terminal, `buf` unchanged) or for a deadline that passes
-    /// inside a record (terminal). Other I/O failures preserve their original
-    /// [`io::Error`] on the first call. Terminal failures clear `buf` and shut
-    /// down this connection; later calls with valid timeouts retain the error
-    /// kind/message and structured NatNet source or OS code. Zero or
-    /// unrepresentable timeout arguments return `InvalidInput` before reading
-    /// and leave the buffer and client state unchanged.
+    /// Returns [`io::ErrorKind::UnexpectedEof`] for partial EOF and
+    /// [`io::ErrorKind::InvalidData`] for invalid framing or an oversized
+    /// record. Terminal failures clear `buf` and shut down the stream; later
+    /// calls replay the kind and message, preserving a NatNet source or OS
+    /// code. Zero or unrepresentable timeouts return
+    /// [`io::ErrorKind::InvalidInput`] before reading, leaving `buf` and the
+    /// client unchanged.
     pub fn recv_record(&mut self, buf: &mut Vec<u8>, record_timeout: Duration) -> io::Result<bool> {
         validate_timeout(record_timeout, "record timeout")?;
         if let Some(terminal) = &self.terminal {

@@ -35,8 +35,7 @@ fn sized_section(out: &mut Vec<u8>, count: i32, body: &[u8]) {
 fn empty_legacy_payload() -> Vec<u8> {
     let mut out = Vec::with_capacity(78);
     put_i32(&mut out, 17);
-    // marker sets, other markers, rigid bodies, skeletons, labelled markers,
-    // force plates and devices: count-only sections in 3.x and 4.0.
+    // Legacy layouts store the seven listed sections as counts and bodies.
     for _ in 0..7 {
         put_i32(&mut out, 0);
     }
@@ -54,8 +53,7 @@ fn empty_legacy_payload() -> Vec<u8> {
 fn empty_v41_payload() -> Vec<u8> {
     let mut out = Vec::with_capacity(122);
     put_i32(&mut out, 17);
-    // marker sets, other markers, rigid bodies, skeletons, assets, labelled
-    // markers, force plates and devices: count + byte size in 4.1.
+    // NatNet 4.1 adds asset and per-section byte sizes.
     for _ in 0..8 {
         put_i32(&mut out, 0);
         put_i32(&mut out, 0);
@@ -147,8 +145,7 @@ fn v41_empty_fixture_has_assets_sizes_and_precision() {
 #[test]
 fn v41_labeled_marker_guard_rejects_a_short_entry_before_truncation() {
     let mut payload = empty_v41_payload();
-    // The labeled-marker section starts after frame number and five sized
-    // sections: marker sets, other markers, rigid bodies, skeletons, assets.
+    // The labeled-marker count follows the five preceding 4.1 sections.
     payload[44..48].copy_from_slice(&1i32.to_le_bytes());
     payload[48..52].copy_from_slice(&25i32.to_le_bytes());
     payload.splice(52..52, std::iter::repeat_n(0u8, 25));
@@ -187,7 +184,7 @@ fn legacy_nonempty_nested_sections_walk_to_the_suffix() {
     let mut payload = Vec::new();
     put_i32(&mut payload, 9);
 
-    // One marker set with one marker.
+    // One marker set containing one marker.
     put_i32(&mut payload, 1);
     payload.extend_from_slice(b"set\0");
     put_i32(&mut payload, 1);
@@ -195,13 +192,13 @@ fn legacy_nonempty_nested_sections_walk_to_the_suffix() {
     put_f32(&mut payload, 2.0);
     put_f32(&mut payload, 3.0);
 
-    // One other marker.
+    // One unnamed marker entry.
     put_i32(&mut payload, 1);
     put_f32(&mut payload, 4.0);
     put_f32(&mut payload, 5.0);
     put_f32(&mut payload, 6.0);
 
-    // One rigid body.
+    // One rigid body with no markers.
     put_i32(&mut payload, 1);
     put_i32(&mut payload, 42);
     for value in [7.0, 8.0, 9.0] {
@@ -213,7 +210,7 @@ fn legacy_nonempty_nested_sections_walk_to_the_suffix() {
     put_f32(&mut payload, 0.01);
     put_u16(&mut payload, 1);
 
-    // One skeleton with one rigid body.
+    // One skeleton containing one rigid body.
     put_i32(&mut payload, 1);
     put_i32(&mut payload, 99);
     put_i32(&mut payload, 1);
@@ -227,7 +224,7 @@ fn legacy_nonempty_nested_sections_walk_to_the_suffix() {
     put_f32(&mut payload, 0.0);
     put_u16(&mut payload, 1);
 
-    // One labelled marker.
+    // One labelled marker entry.
     put_i32(&mut payload, 1);
     put_i32(&mut payload, 7);
     for value in [1.0, 2.0, 3.0] {
@@ -385,8 +382,7 @@ fn v41_nonempty_sections_use_independent_sizes_and_nested_extents() {
 #[test]
 fn compatibility_preserves_opaque_v41_raw_body_but_strict_checks_it() {
     let mut payload = empty_v41_payload();
-    // Skeleton count/size are the fourth 4.1 section, after frame number and
-    // three typed sections: count at 28, size at 32.
+    // The skeleton section is fourth: count at 28, size at 32.
     payload[28..32].copy_from_slice(&0i32.to_le_bytes());
     payload[32..36].copy_from_slice(&1i32.to_le_bytes());
     payload.insert(36, 0xa5);
@@ -522,8 +518,7 @@ fn negative_frame_counts_and_sizes_are_invalid_under_both_policies() {
     v41_count[4..8].copy_from_slice(&(-2i32).to_le_bytes());
     cases.push((v41_count, v41, -2, 4));
 
-    // 4.1 byte size of a typed section and of an opaque raw section
-    // (skeletons: count at 28, size at 32).
+    // 4.1 skeleton byte size follows its count at offsets 28 and 32.
     let mut typed_size = empty_v41_payload();
     typed_size[8..12].copy_from_slice(&(-3i32).to_le_bytes());
     cases.push((typed_size, v41, -3, 8));
@@ -531,7 +526,7 @@ fn negative_frame_counts_and_sizes_are_invalid_under_both_policies() {
     raw_size[32..36].copy_from_slice(&i32::MIN.to_le_bytes());
     cases.push((raw_size, v41, i32::MIN, 32));
 
-    // Nested typed count: one marker set "a" whose marker count is -4.
+    // One marker set with an invalid nested marker count of -4.
     let mut nested = Vec::new();
     put_i32(&mut nested, 17);
     put_i32(&mut nested, 1);
@@ -566,12 +561,12 @@ fn checked_frame_datagram_refuses_a_payload_its_header_cannot_declare() {
         })
     );
 
-    // Only the lossy encoder keeps the saturated header.
+    // The lossy encoder preserves the saturated header.
     let lossy = frame.to_datagram_lossy(Version::V4_1).unwrap();
     assert_eq!(&lossy[..4], &[7, 0, 0xff, 0xff]);
     assert_eq!(&lossy[4..], payload.as_slice());
 
-    // The largest declarable payload is still accepted.
+    // The largest representable payload remains encodable.
     frame.other_markers.clear();
     let base = frame.to_payload(Version::V4_1).unwrap().len();
     let fill = (usize::from(u16::MAX) - base) / 12;
@@ -582,8 +577,7 @@ fn checked_frame_datagram_refuses_a_payload_its_header_cannot_declare() {
 
 #[test]
 fn frame_params_expose_the_bitstream_changed_bit() {
-    // NatNetTypes.h 4.1.0.0: b3 (0x08) is "bitstream version changed"; b2
-    // (0x04) is Live/Edit mode and must not read as a bitstream change.
+    // Bit 3 signals a bitstream change; bit 2 is Live/Edit mode.
     let mut frame = empty_frame();
     for (params, changed) in [
         (0x0000, false),

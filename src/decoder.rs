@@ -3,10 +3,8 @@
 use crate::message;
 use crate::{Error, FrameOfData, Message, ModelDef, ParsePolicy, Result, ServerInfo, Version};
 
-/// A supported protocol layout and parsing policy, independent of transport.
-///
-/// Construct from the version reported by [`ServerInfo`]. Strict validation is
-/// the default; [`Self::with_policy`] selects historical compatibility behavior.
+/// Decodes messages using a supported protocol layout and parsing policy.
+/// Construct from [`ServerInfo`]'s reported version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decoder {
     version: Version,
@@ -15,7 +13,6 @@ pub struct Decoder {
 
 impl Decoder {
     /// Selects a supported layout with strict validation.
-    ///
     /// # Errors
     /// Returns [`Error::UnsupportedVersion`] for an unlisted major/minor pair.
     pub fn new(version: Version) -> Result<Self> {
@@ -46,10 +43,8 @@ impl Decoder {
     }
 
     /// Decodes one datagram, retaining the layout for subsequent encoding.
-    ///
     /// Unknown message IDs remain opaque. The outer declared length remains
     /// telemetry-only under both policies.
-    ///
     /// # Errors
     /// Returns header, field or strict-validation errors for known messages.
     pub fn parse(self, datagram: &[u8]) -> Result<DecodedMessage> {
@@ -78,10 +73,7 @@ impl Decoder {
     }
 }
 
-/// A decoded message retaining the layout selected for its interpretation.
-///
-/// Read-only access preserves that pairing. [`Self::into_message`] deliberately
-/// removes it so a caller can reconstruct or explicitly convert plain values.
+/// A decoded message paired with the layout used to interpret it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedMessage {
     message: Message,
@@ -89,35 +81,25 @@ pub struct DecodedMessage {
 }
 
 impl DecodedMessage {
-    /// The decoded plain value, without mutable access to its source pairing.
+    /// The decoded message. Borrowing keeps the source-layout pairing.
     #[must_use]
     pub const fn message(&self) -> &Message {
         &self.message
     }
 
-    /// The version selected by the decoder, including build/revision provenance.
+    /// The version selected by the decoder.
     #[must_use]
     pub const fn version(&self) -> Version {
         self.version
     }
 
-    /// Removes the source-layout pairing and returns the plain model.
+    /// Returns the message without its source-layout pairing.
     #[must_use]
     pub fn into_message(self) -> Message {
         self.message
     }
 
     /// Re-encodes using the original source layout.
-    ///
-    /// Decoding is not always reversible through the checked encoders. Names
-    /// are decoded with lossy UTF-8 replacement, so a decoded SERVERINFO
-    /// application name can be longer than the 255 bytes its field accepts
-    /// (a 256-byte field without NUL, or invalid bytes each widened to a
-    /// 3-byte U+FFFD; see [`ServerInfo::application_name`](crate::ServerInfo::application_name)),
-    /// and replacement can also grow a FrameOfData or MODELDEF payload past
-    /// the 65 535 bytes a header can declare. A message decoded from a buffer
-    /// longer than a UDP datagram can exceed that limit too. Each such case
-    /// returns an error rather than a datagram that differs from the value.
     ///
     /// # Errors
     /// Returns checked encoding errors, including values accepted only by
@@ -130,12 +112,10 @@ impl DecodedMessage {
 
     /// Explicitly re-encodes in a supported destination layout.
     ///
-    /// Cross-layout non-empty raw frame sections, MODELDEF rigid-body tails
-    /// (including skeleton bones and asset rigid bodies) and
-    /// [`DataSet::Other`](crate::DataSet::Other) datasets require explicit
-    /// reconstruction through [`Self::into_message`]. Unsupported
-    /// assets or precision fields are refused by the destination encoder.
-    ///
+    /// Cross-layout opaque frame sections, MODELDEF rigid-body tails
+    /// (including skeleton and asset bodies) and [`DataSet::Other`](crate::DataSet::Other)
+    /// datasets require reconstruction through [`Self::into_message`]. The
+    /// destination encoder refuses unsupported assets or precision fields.
     /// # Errors
     /// Returns unsupported-version, opaque-conversion or checked encoder errors.
     pub fn to_datagram_for(&self, version: Version) -> Result<Vec<u8>> {
@@ -186,7 +166,7 @@ impl DecodedMessage {
                         reason: "cross-layout encoding requires explicit reconstruction",
                     });
                 }
-                model.to_datagram_version(version)
+                model.to_datagram(version)
             }
             Message::Other { id, payload } => message::frame_checked(*id, payload),
         }

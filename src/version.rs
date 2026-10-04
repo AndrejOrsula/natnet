@@ -1,5 +1,4 @@
-//! The NatNet protocol (bitstream) version and the version-negotiation
-//! surface: never assume a fixed version; branch on the bitstream.
+//! NatNet bitstream versions and supported layout selection.
 
 use crate::{Error, Result};
 
@@ -13,7 +12,7 @@ pub enum ParsePolicy {
     /// Reject invalid counts, terminators and unexplained trailing bytes.
     #[default]
     Strict,
-    /// Preserve the historical standalone parsers' extension tolerance.
+    /// Preserve extension tolerance for compatible decoding.
     Compatible,
 }
 
@@ -44,9 +43,8 @@ impl Layout {
 
 /// A four-part version quadruple `major.minor.build.revision`.
 ///
-/// The NatNet **protocol** version is carried as the four bitstream bytes of
-/// a SERVERINFO reply (e.g. `04 01 00 00` = 4.1.0.0). The same shape holds
-/// the server application version (e.g. Motive `03 01 02 01` = 3.1.2.1).
+/// SERVERINFO carries the protocol version as four bitstream bytes, such as
+/// `04 01 00 00` for 4.1.0.0. The same type represents application versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Version {
@@ -61,8 +59,7 @@ pub struct Version {
 }
 
 impl Version {
-    /// The NatNet 4.1.0.0 protocol version — the bitstream this crate is
-    /// checked against real Motive captures at.
+    /// NatNet protocol version 4.1.0.0.
     pub const V4_1: Self = Self::new(4, 1, 0, 0);
 
     /// Verifies that the major/minor pair names a supported wire layout.

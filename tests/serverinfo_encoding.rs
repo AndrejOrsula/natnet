@@ -1,4 +1,4 @@
-//! Public SERVERINFO encoding and strict/compatibility decoding contracts.
+//! SERVERINFO encoding, version retention, and parse-policy contracts.
 #![allow(clippy::unwrap_used)]
 
 use natnet::{ConnectionInfo, Error, ParsePolicy, ServerInfo, Version};

@@ -66,8 +66,8 @@ fn run(options: &Options) -> Result<(), String> {
     let reply = client
         .exchange(&request, TIMEOUT)
         .map_err(|e| format!("NAT_REQUEST_MODELDEF: {e}"))?;
-    let model = ModelDef::parse_version(&reply, info.protocol_version)
-        .map_err(|e| format!("MODELDEF: {e}"))?;
+    let model =
+        ModelDef::parse(&reply, info.protocol_version).map_err(|e| format!("MODELDEF: {e}"))?;
     print_model(&model);
 
     if options.frames == 0 {

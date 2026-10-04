@@ -1,6 +1,5 @@
-//! Malformed / truncated inputs must return `Err`, never panic, overflow or
-//! hang (done-when: fuzz-style over every prefix of a real-shaped packet, and
-//! over random bytes).
+//! Malformed and truncated inputs must return `Err`, never panic, overflow or
+//! hang. Coverage includes every prefix of a valid datagram and random bytes.
 
 #![allow(
     clippy::expect_used,
@@ -65,12 +64,13 @@ fn well_formed_frame() -> Vec<u8> {
 fn every_prefix_is_err_or_ok_never_panic() {
     let full = well_formed_frame();
     for len in 0..=full.len() {
-        let slice = full[..len].to_vec();
         let r = catch_unwind(|| {
-            let _ = FrameOfData::parse(&slice, Version::V4_1);
-            let _ = ServerInfo::parse(&slice);
-            let _ = ModelDef::parse(&slice);
-            let _ = natnet::parse_message(&slice, Version::V4_1);
+            let _ = FrameOfData::parse(&full[..len], Version::V4_1);
+            let _ = ServerInfo::parse(&full[..len]);
+            let _ = ModelDef::parse(&full[..len], Version::V4_1);
+            let _ = natnet::Decoder::new(Version::V4_1)
+                .expect("supported")
+                .parse(&full[..len]);
         });
         assert!(r.is_ok(), "panicked on prefix length {len}");
     }
@@ -99,8 +99,10 @@ fn random_bytes_never_panic() {
         let r = catch_unwind(|| {
             let _ = FrameOfData::parse(&buf, Version::V4_1);
             let _ = ServerInfo::parse(&buf);
-            let _ = ModelDef::parse(&buf);
-            let _ = natnet::parse_message(&buf, Version::V4_1);
+            let _ = ModelDef::parse(&buf, Version::V4_1);
+            let _ = natnet::Decoder::new(Version::V4_1)
+                .expect("supported")
+                .parse(&buf);
         });
         assert!(r.is_ok(), "panicked on random trial {trial} (len {len})");
     }
@@ -125,18 +127,15 @@ fn hostile_count_is_rejected() {
     ));
 }
 
-/// The V4_1 payload of the all-sections-empty frame, as a value
-/// `parse_payload` produced — carrying its own reach control, so a failure in
-/// a test below that patches it tracks the patched header field and not the
-/// fixture.
+/// Build an all-sections-empty V4_1 payload and verify it parses before use.
 fn degenerate_payload() -> Vec<u8> {
     let mut f =
         FrameOfData::parse(&well_formed_frame(), Version::V4_1).expect("the fixture parses");
     f.marker_sets.clear();
     f.rigid_bodies.clear();
     let payload = f.to_payload(Version::V4_1).expect("valid fixture encodes");
-    // `frame_number` is the only field ahead of the first section, so the
-    // marker-set header sits at a fixed offset: count `[4..8]`, size `[8..12]`.
+    // `frame_number` precedes the first section, placing its count at `[4..8]`
+    // and size at `[8..12]`.
     assert_eq!(payload.len(), 122, "the degenerate V4_1 payload");
     assert_eq!(
         FrameOfData::parse_payload(&payload, Version::V4_1).expect("the control parses"),

@@ -1,4 +1,4 @@
-//! The NatNet command channel and its write-tier boundary.
+//! Validated NatNet command requests and guarded property writes.
 //!
 //! Command requests are validated before they are framed. A [`Request`] owns
 //! immutable bytes and private metadata describing the operation that produced
@@ -33,11 +33,11 @@ pub enum CommandComponent {
     Property,
     /// A textual property value.
     Value,
-    /// The audit metadata identifying the person or process that signed off.
+    /// Audit metadata naming the person or process that signed off.
     Authority,
 }
 
-/// Why a command component is not representable by the ASCII command grammar.
+/// Why a component is not representable in the ASCII command grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ComponentError {
@@ -49,27 +49,23 @@ pub enum ComponentError {
     Nul,
     /// A control byte, including DEL, is not command text.
     Control(u8),
-    /// NatNet's remote command grammar is ASCII; no implicit UTF-8 encoding is
-    /// introduced here.
+    /// Non-ASCII input; no implicit UTF-8 encoding is applied.
     NonAscii(u8),
 }
 
 /// An immutable, validated NatNet command datagram.
 ///
-/// The fields are deliberately private. There is no `From<Vec<u8>>`,
-/// `AsRef<[u8]>`, `AsMut`, or serde deserialization path that could turn
-/// arbitrary bytes into a trusted request. Consumers that own a socket may
-/// explicitly borrow [`Request::as_bytes`], while the safe `net` client takes
-/// the request type itself.
+/// Private fields prevent forging: no `From<Vec<u8>>`, `AsRef<[u8]>`, `AsMut`
+/// or `Deserialize` turns arbitrary bytes into a request. Read the bytes with
+/// [`Request::as_bytes`]. `Debug` includes Tier-2 authority metadata,
+/// which is an audit label, not authenticated identity.
 ///
 /// ```compile_fail
-/// let mut request = natnet::command::connect_request().unwrap();
-/// request.as_bytes()[0] = 1;
+/// natnet::command::connect_request().unwrap().as_bytes()[0] = 1;
 /// ```
 ///
 /// ```compile_fail
-/// use natnet::command::Request;
-/// let _forged: Request = vec![0, 0, 0, 0].into();
+/// let _forged: natnet::command::Request = vec![0, 0, 0, 0].into();
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -84,26 +80,22 @@ impl Request {
         &self.bytes
     }
 
-    /// The internal operation kind used by the safe transport.
     #[cfg(feature = "net")]
     pub(crate) fn kind(&self) -> RequestKind {
         self.metadata.kind
     }
 
-    /// The expected reply shape for this request.
     #[cfg(feature = "net")]
     pub(crate) fn response_kind(&self) -> ResponseKind {
         self.metadata.response
     }
 
-    /// The write tier, when this is a write request.
     #[cfg(feature = "net")]
     pub(crate) fn tier(&self) -> Option<WriteTier> {
         self.metadata.tier
     }
 }
 
-/// Internal operation metadata carried by [`Request`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RequestMetadata {
     kind: RequestKind,
@@ -115,7 +107,6 @@ struct RequestMetadata {
     authority: Option<String>,
 }
 
-/// Internal request operation used by the safe transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestKind {
     Connect,
@@ -125,8 +116,6 @@ pub(crate) enum RequestKind {
     SetProperty,
 }
 
-/// Internal response shape selected by the request rather than guessed from
-/// an ambiguous four-byte payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResponseKind {
     ServerInfo,
@@ -136,16 +125,10 @@ pub(crate) enum ResponseKind {
     Value,
 }
 
-/// Builds a NAT_CONNECT hello request.
-///
-/// The payload is empty, which a server treats as a client without connection
-/// options; Motive then streams its current bitstream. See
-/// [`connect_request_with`] to request one.
+/// Builds an empty NAT_CONNECT hello; use [`connect_request_with`] for options.
 ///
 /// # Errors
-///
-/// This fixed empty request is infallible; the `Result` keeps all command
-/// builders on one construction boundary.
+/// This fixed request cannot fail.
 pub fn connect_request() -> core::result::Result<Request, CommandError> {
     Ok(empty_request(
         NAT_CONNECT,
@@ -154,34 +137,25 @@ pub fn connect_request() -> core::result::Result<Request, CommandError> {
     ))
 }
 
-/// Length of the sender block (`sSender`: 256-byte name, application version,
-/// NatNet version) that precedes the connection options in a NAT_CONNECT
-/// payload.
+/// NAT_CONNECT sender block length: 256-byte name plus application and NatNet versions.
 pub const CONNECT_SENDER_LEN: usize = 264;
 
-/// Payload length of the NAT_CONNECT request [`connect_request_with`] builds:
-/// the sender block, `subscribedDataOnly`, `BitstreamVersion[4]` and one zero
-/// byte, as the NatNet SDK 4.1 Python sample sends.
+/// NAT_CONNECT options payload length: sender block, flag, four-byte version, and NUL.
 pub const CONNECT_OPTIONS_PAYLOAD_LEN: usize = CONNECT_SENDER_LEN + 6;
 
-/// NAT_CONNECT connection options (the SDK's `sConnectionOptions`).
-///
-/// The NatNet SDK 4.1 samples send them after a zeroed sender block.
-/// According to the SDK `PacketClient` sample, a zero version asks Motive for
-/// its current bitstream, and a bitstream change needs a NatNet 3 or later
-/// server and unicast data; with multicast data, request no version. Whether
-/// a given Motive release honours the request is not verified by this crate.
+/// NAT_CONNECT connection options. A zero version requests the current
+/// bitstream; version switching requires NatNet 3+ and unicast. Motive support
+/// for these options is not verified by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConnectOptions {
-    /// Ask the server to send only subscribed data (`subscribedDataOnly`).
+    /// Ask the server to send only subscribed data.
     pub subscribed_data_only: bool,
-    /// Bitstream version to request (`BitstreamVersion`); `None` sends
-    /// 0.0.0.0, the server's current version.
+    /// Requested bitstream; `None` sends 0.0.0.0 (current version).
     pub bitstream_version: Option<Version>,
 }
 
 impl ConnectOptions {
-    /// Options that request `version` and nothing else.
+    /// Options that request only `version`.
     #[must_use]
     pub const fn requesting(version: Version) -> Self {
         Self {
@@ -190,11 +164,8 @@ impl ConnectOptions {
         }
     }
 
-    /// Reads the options from a NAT_CONNECT payload, as a server does.
-    ///
-    /// Returns `None` for a payload too short to hold them, including the
-    /// empty payload of [`connect_request`]. A 0.0.0.0 version reads as
-    /// `None`.
+    /// Reads options at offset 264. Returns `None` if fewer than 269 bytes are
+    /// present or the encoded version is 0.0.0.0; ignores trailing bytes.
     #[must_use]
     pub fn parse(payload: &[u8]) -> Option<Self> {
         let flag = *payload.get(CONNECT_SENDER_LEN)?;
@@ -206,10 +177,8 @@ impl ConnectOptions {
         })
     }
 
-    /// The bitstream a server that sent `info` streams to a client that
-    /// connected with these options, by the SDK `PacketClient` rule: the
-    /// requested version when one was requested and the server speaks NatNet 3
-    /// or later, otherwise the server's.
+    /// Stream version by the SDK rule: requested version for NatNet 3+, else
+    /// the server's advertised version.
     #[must_use]
     pub fn stream_version(&self, info: &ServerInfo) -> Version {
         match self.bitstream_version {
@@ -219,15 +188,10 @@ impl ConnectOptions {
     }
 }
 
-/// Builds a NAT_CONNECT hello carrying connection options.
-///
-/// The payload is [`CONNECT_OPTIONS_PAYLOAD_LEN`] bytes: a zeroed sender
-/// block, then the options at offset [`CONNECT_SENDER_LEN`].
+/// Builds NAT_CONNECT with options at [`CONNECT_SENDER_LEN`] in a zeroed block.
 ///
 /// # Errors
-///
-/// This fixed-size request is infallible; the `Result` keeps all command
-/// builders on one construction boundary.
+/// This fixed-size request cannot fail.
 pub fn connect_request_with(
     options: ConnectOptions,
 ) -> core::result::Result<Request, CommandError> {
@@ -242,12 +206,10 @@ pub fn connect_request_with(
     Ok(request)
 }
 
-/// Builds a NAT_REQUEST_MODELDEF request.
+/// Builds an empty NAT_REQUEST_MODELDEF request.
 ///
 /// # Errors
-///
-/// This fixed empty request is infallible; the `Result` keeps all command
-/// builders on one construction boundary.
+/// This fixed request cannot fail.
 pub fn request_modeldef() -> core::result::Result<Request, CommandError> {
     Ok(empty_request(
         NAT_REQUEST_MODELDEF,
@@ -256,18 +218,12 @@ pub fn request_modeldef() -> core::result::Result<Request, CommandError> {
     ))
 }
 
-/// Builds a NAT_REQUEST_FRAMEOFDATA request, which asks the server for one
-/// FrameOfData on the command channel.
-///
-/// The NatNet SDK 4.1 defines the message and its FrameOfData reply, but its
-/// samples never send it, and this crate has not observed how Motive answers
-/// it. A server that does not support it replies NAT_UNRECOGNIZED_REQUEST,
-/// which the `net` client reports as `Unsupported`.
+/// Builds an empty request for one FrameOfData on the command channel.
+/// Motive's answer is unverified (SDK samples never send it). Unsupported
+/// servers reply NAT_UNRECOGNIZED_REQUEST; `net` reports it as `Unsupported`.
 ///
 /// # Errors
-///
-/// This fixed empty request is infallible; the `Result` keeps all command
-/// builders on one construction boundary.
+/// This fixed request cannot fail.
 pub fn request_frame_of_data() -> core::result::Result<Request, CommandError> {
     Ok(empty_request(
         NAT_REQUEST_FRAMEOFDATA,
@@ -276,22 +232,15 @@ pub fn request_frame_of_data() -> core::result::Result<Request, CommandError> {
     ))
 }
 
-/// The NAT_KEEPALIVE datagram: the 4-byte header with an empty payload.
-///
-/// A unicast client sends it periodically on the command channel so the server
-/// keeps streaming to it; it has no reply, so it is a plain datagram rather
-/// than a [`Request`]. The NatNet SDK 4.1 `PacketClient.cpp` sample sends
-/// exactly these four bytes (its Python sample appends one NUL).
+/// Empty-payload NAT_KEEPALIVE datagram. Unicast clients send it periodically
+/// on the command channel; it has no reply and is not a [`Request`].
 #[must_use]
 pub const fn keepalive_datagram() -> [u8; HEADER_LEN] {
     empty_datagram(NAT_KEEPALIVE)
 }
 
-/// The NAT_DISCONNECT datagram: the 4-byte header with an empty payload.
-///
-/// A client sends it to announce that it leaves; it has no reply. How long
-/// Motive keeps streaming to a unicast client that leaves without it, or
-/// whether it stops at once when it arrives, is not verified here.
+/// Empty-payload NAT_DISCONNECT datagram; a client sends it when leaving.
+/// Whether Motive stops a unicast stream at once on it is unverified.
 #[must_use]
 pub const fn disconnect_datagram() -> [u8; HEADER_LEN] {
     empty_datagram(NAT_DISCONNECT)
@@ -317,17 +266,14 @@ fn empty_request(message_id: u16, kind: RequestKind, response: ResponseKind) -> 
     }
 }
 
-/// Encodes a read-only `GetProperty,<node>,<property>` request.
-///
-/// Empty `node` is retained for Motive's root-level property scope. A
-/// property name must still be nonempty. Known allowlisted properties are
-/// emitted in their canonical spelling; other read-only names are preserved
-/// after validation and one outer-space trim.
+/// Encodes read-only `GetProperty,<node>,<property>`; empty `node` selects
+/// Motive's root scope. Property must be nonempty. Known names are
+/// canonicalized; other names are validated and trimmed.
 ///
 /// # Errors
 ///
-/// Returns [`CommandError`] when a component contains a comma, NUL, control
-/// byte, non-ASCII byte, or when the framed payload exceeds `u16::MAX`.
+/// Returns [`CommandError`] for an invalid component or payload over
+/// `u16::MAX` bytes.
 pub fn get_property(node: &str, property: &str) -> core::result::Result<Request, CommandError> {
     validate_component(node, CommandComponent::Node, true)?;
     let property = canonical_property(property)?;
@@ -452,8 +398,7 @@ fn canonical_property(property: &str) -> core::result::Result<String, CommandErr
 pub enum PropertyValue {
     /// A boolean flag.
     Bool(bool),
-    /// An integer value. The command layer does not invent a device-specific
-    /// range for Video Mode.
+    /// An integer; valid Video Mode ranges are device-specific.
     Int(i64),
     /// A textual value in the NatNet ASCII command grammar.
     Text(String),
@@ -599,7 +544,10 @@ fn build_set_request(
     ))
 }
 
-/// An explicit authorization for one Tier-2 action.
+/// Explicit authorization to build one Tier-2 write; private fields prevent
+/// forging. Consuming the grant does not limit sends because [`Request`] is
+/// cloneable. Authority is audit metadata, not authenticated identity or replay
+/// protection.
 ///
 /// ```compile_fail
 /// use natnet::command::{Tier2Grant, Tier2Property};
@@ -615,15 +563,11 @@ pub struct Tier2Grant {
 }
 
 impl Tier2Grant {
-    /// Records an explicit, per-action sign-off.
-    ///
-    /// The authority is audit metadata, not authenticated identity. It is
-    /// consumed into the resulting request and cannot be replaced later.
+    /// Records per-action sign-off as immutable audit metadata.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError::InvalidComponent`] for empty, non-ASCII, or
-    /// command-breaking authority metadata.
+    /// Returns [`CommandError::InvalidComponent`] for empty or invalid metadata.
     pub fn sign_off(
         authority: impl Into<String>,
         action: Tier2Property,
@@ -659,8 +603,8 @@ impl Tier2Write {
     ///
     /// # Errors
     ///
-    /// Returns a validation error for the node or value, or
-    /// [`CommandError::UnsupportedOperation`] for `AssetDefinition`.
+    /// Returns validation errors or [`CommandError::UnsupportedOperation`]
+    /// for `AssetDefinition`.
     #[allow(clippy::needless_pass_by_value)]
     pub fn authorize(
         grant: Tier2Grant,
@@ -730,8 +674,8 @@ impl core::fmt::Debug for PlannedTarget {
     }
 }
 
-/// A validated Tier-1 write batch. Every target and every request is
-/// validated before [`Tier1Write::begin`] can expose the first request.
+/// Validated Tier-1 batch. All targets and requests validate before `begin`
+/// exposes the first request.
 #[derive(Debug)]
 pub struct Tier1Write {
     property: String,
@@ -744,9 +688,7 @@ impl Tier1Write {
     /// Plans a per-camera `Enabled` write.
     ///
     /// # Errors
-    ///
-    /// Returns a validation, empty-target, duplicate-target, or request-size
-    /// error before exposing any request.
+    /// Invalid components, no targets, duplicate targets, or oversized requests.
     pub fn camera_enabled(
         serials: Vec<String>,
         enabled: bool,
@@ -754,13 +696,11 @@ impl Tier1Write {
         Self::new(serials, "Enabled", PropertyValue::Bool(enabled))
     }
 
-    /// Plans a per-camera `Video Mode` write. No unsupported numeric range is
-    /// invented here; the producer remains authoritative for valid modes.
+    /// Plans a per-camera `Video Mode` write; device-specific ranges are not
+    /// enforced here.
     ///
     /// # Errors
-    ///
-    /// Returns a validation, empty-target, duplicate-target, or request-size
-    /// error before exposing any request.
+    /// Invalid components, no targets, duplicate targets, or oversized requests.
     pub fn camera_video_mode(
         serials: Vec<String>,
         mode: i64,
@@ -771,9 +711,7 @@ impl Tier1Write {
     /// Plans a streaming-pane `Streaming` write over asset identities.
     ///
     /// # Errors
-    ///
-    /// Returns a validation, empty-target, duplicate-target, or request-size
-    /// error before exposing any request.
+    /// Invalid components, no targets, duplicate targets, or oversized requests.
     pub fn asset_streaming(
         assets: Vec<String>,
         streaming: bool,
@@ -854,25 +792,18 @@ impl Tier1Write {
     }
 }
 
-/// One write/re-read pair in a Tier-1 sequence.
-///
-/// The state is linear: it cannot be cloned or used again after verification.
+/// One write/re-read pair; linear state cannot be reused after verification.
 ///
 /// ```compile_fail
 /// use natnet::command::Tier1Write;
-/// let step = Tier1Write::camera_enabled(vec!["cam-1".into()], true)
-///     .unwrap()
-///     .begin();
+/// let step = Tier1Write::camera_enabled(vec!["cam-1".into()], true).unwrap().begin();
 /// let _copy = step.clone();
 /// ```
 ///
 /// ```compile_fail
 /// use natnet::command::Tier1Write;
-/// let step = Tier1Write::camera_enabled(vec!["cam-1".into()], true)
-///     .unwrap()
-///     .begin();
-/// let _verified = step.verify_echo("1");
-/// let _reused = step.target();
+/// let step = Tier1Write::camera_enabled(vec!["cam-1".into()], true).unwrap().begin();
+/// let _ = step.verify_echo("1").unwrap(); let _ = step.target();
 /// ```
 #[derive(Debug)]
 pub struct CanaryStep {
@@ -889,12 +820,6 @@ impl CanaryStep {
     #[must_use]
     pub fn target(&self) -> &str {
         &self.current.target
-    }
-
-    /// Alias naming the first target as the canary.
-    #[must_use]
-    pub fn canary_target(&self) -> &str {
-        self.target()
     }
 
     /// Whether this is the first target in the sequence.
@@ -915,16 +840,12 @@ impl CanaryStep {
         &self.current.reread_request
     }
 
-    /// Verifies a value reply after a caller has decoded it in request
-    /// context. This compatibility seam does not observe the SetProperty
-    /// status; transports should prefer [`Self::verify_status`].
+    /// Verifies a request-context value re-read, without checking write status.
+    /// Transports should prefer [`Self::verify_status`].
     ///
     /// # Errors
-    ///
-    /// Returns [`CommandError::RereadMismatch`] when the value does not echo
-    /// the intended property value. After an earlier target has completed,
-    /// the failure is wrapped in [`CommandError::VerificationFailed`] with
-    /// those prior records attached.
+    /// [`CommandError::RereadMismatch`], wrapped in
+    /// [`CommandError::VerificationFailed`] when prior targets completed.
     pub fn verify_echo(self, echo: &str) -> core::result::Result<Verified, CommandError> {
         self.finish(None, echo)
     }
@@ -936,12 +857,8 @@ impl CanaryStep {
     /// documented Motive ambiguity.
     ///
     /// # Errors
-    ///
-    /// Returns [`CommandError::Wire`] for malformed replies,
-    /// [`CommandError::UnverifiableReply`] for a status reply, or
-    /// [`CommandError::RereadMismatch`] for a different value, or
-    /// [`CommandError::VerificationFailed`] with prior records after an
-    /// earlier target has completed.
+    /// [`CommandError::Wire`], [`CommandError::UnverifiableReply`],
+    /// [`CommandError::RereadMismatch`], or [`CommandError::VerificationFailed`].
     pub fn verify(self, reread_reply: &[u8]) -> core::result::Result<Verified, CommandError> {
         let response = match CommandResponse::parse(reread_reply) {
             Ok(response) => response,
@@ -953,18 +870,13 @@ impl CanaryStep {
         }
     }
 
-    /// Verifies the write status and then the request-context value re-read.
-    /// A nonzero status or any malformed/mismatched reply consumes the step
-    /// and yields a structured failure; no next target can be obtained.
+    /// Verifies write status, then the request-context value re-read. Failure
+    /// consumes the step, so no next target can be obtained.
     ///
     /// # Errors
-    ///
-    /// Returns [`CommandError::Wire`] for malformed replies,
-    /// [`CommandError::StatusFailure`] for a nonzero write status,
-    /// [`CommandError::StatusExpected`] for a value-shaped write reply, or
-    /// [`CommandError::RereadMismatch`] for a different value, or
-    /// [`CommandError::VerificationFailed`] with prior records after an
-    /// earlier target has completed.
+    /// [`CommandError::Wire`], [`CommandError::StatusFailure`],
+    /// [`CommandError::StatusExpected`], [`CommandError::RereadMismatch`], or
+    /// [`CommandError::VerificationFailed`].
     pub fn verify_status(
         self,
         status_reply: &[u8],
@@ -1036,8 +948,7 @@ impl CanaryStep {
     }
 }
 
-/// A successfully verified step. Calling [`Verified::next`] consumes this
-/// state and exposes exactly one next target, preserving sequential progress.
+/// Verified step; [`Verified::next`] consumes it and exposes one next target.
 #[derive(Debug)]
 pub struct Verified {
     remaining: VecDeque<PlannedTarget>,
@@ -1047,8 +958,7 @@ pub struct Verified {
 }
 
 impl Verified {
-    /// Takes ownership of the next target's write/re-read pair. `None` means
-    /// every target, including the canary, has been verified.
+    /// Takes the next target pair; `None` means all targets were verified.
     #[must_use]
     pub fn next(self) -> Option<CanaryStep> {
         let mut remaining = self.remaining;
@@ -1072,9 +982,7 @@ impl Verified {
     /// Returns the completed log once no target remains.
     ///
     /// # Errors
-    ///
-    /// Returns [`CommandError::UnfinishedTargets`] when a caller attempts to
-    /// finish before consuming and verifying every target.
+    /// [`CommandError::UnfinishedTargets`] if targets remain.
     pub fn finish(self) -> core::result::Result<ProgressLog, CommandError> {
         if !self.remaining.is_empty() {
             return Err(CommandError::UnfinishedTargets {
@@ -1087,7 +995,7 @@ impl Verified {
     }
 }
 
-/// The durable, structured progress produced by a completed Tier-1 sequence.
+/// Structured progress from a completed Tier-1 sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressLog {
     records: Vec<ProgressRecord>,
@@ -1117,7 +1025,7 @@ impl ProgressRecord {
         &self.target
     }
 
-    /// Whether this record is the first-target canary or a later target.
+    /// Whether this is the first-target canary or a later target.
     #[must_use]
     pub const fn phase(&self) -> ProgressPhase {
         self.phase
@@ -1145,8 +1053,8 @@ pub enum ProgressPhase {
     Target,
 }
 
-/// The stringly Tier-1 entry point. Unknown and Tier-2 properties fail
-/// closed; valid allowlisted spellings are canonicalized before emission.
+/// Stringly Tier-1 entry point. Unknown and Tier-2 properties fail closed;
+/// allowlisted names are canonicalized.
 #[derive(Debug)]
 pub struct SetProperty;
 
@@ -1155,9 +1063,8 @@ impl SetProperty {
     ///
     /// # Errors
     ///
-    /// Returns [`CommandError::Tier2Refused`] for unknown or Tier-2
-    /// properties, or another construction error for invalid components and
-    /// targets.
+    /// Returns [`CommandError::Tier2Refused`] for unapproved properties or a
+    /// construction error for invalid components and targets.
     pub fn plan(
         nodes: Vec<String>,
         property: &str,
@@ -1236,14 +1143,13 @@ impl CommandResponse {
         Reader::new(payload).cstr()
     }
 
-    /// Builds a status datagram for sans-io tests and mock peers.
+    /// Builds a status datagram for tests and mock peers.
     #[must_use]
     pub fn status_datagram(status: i32) -> Vec<u8> {
         message::frame(NAT_RESPONSE, &status.to_le_bytes())
     }
 
-    /// Builds a value datagram for sans-io tests and mock peers. A three-byte
-    /// value deliberately demonstrates the generic response ambiguity.
+    /// Builds a value datagram for tests and mock peers.
     #[must_use]
     pub fn value_datagram(value: &str) -> Vec<u8> {
         let mut payload = value.as_bytes().to_vec();

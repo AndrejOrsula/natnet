@@ -1,11 +1,5 @@
-//! Bounds-checked little-endian cursor ([`Reader`]) and append-only
-//! [`Writer`] — the sans-io read/write primitives every message type is
-//! built from.
-//!
-//! The reader **never panics**: every accessor returns [`Result`], so a
-//! truncated datagram fails with [`Error::UnexpectedEof`] instead of an
-//! out-of-bounds index. This is the foundation of the crate's total-decode
-//! guarantee.
+//! Bounds-checked little-endian [`Reader`] and append-only [`Writer`].
+//! Truncated reads return [`Error::UnexpectedEof`].
 
 use crate::error::{Error, Result};
 
@@ -133,9 +127,8 @@ impl<'a> Reader<'a> {
     }
 
     /// Reads a NUL-terminated string, consuming the terminator.
-    ///
-    /// Non-UTF-8 bytes are lossily replaced; the terminator must exist
-    /// within the buffer or [`Error::UnterminatedString`] is returned.
+    /// Replaces invalid UTF-8; returns [`Error::UnterminatedString`] if no
+    /// terminator appears in the remaining buffer.
     pub(crate) fn cstr(&mut self) -> Result<String> {
         let start = self.position();
         let rel = self.data[self.pos..]
@@ -147,19 +140,14 @@ impl<'a> Reader<'a> {
         Ok(text)
     }
 
-    /// Reads a fixed-`width` byte field and decodes it as a string that
-    /// **stops at the first NUL** — later bytes in the field (stale
-    /// server-buffer content) are discarded. The SERVERINFO application-name
-    /// field is exactly this shape.
+    /// Reads `width` bytes, stopping at the first NUL; later bytes are ignored.
     pub(crate) fn fixed_cstr(&mut self, width: usize) -> Result<String> {
         let field = self.take(width)?;
         let end = field.iter().position(|&b| b == 0).unwrap_or(width);
         Ok(String::from_utf8_lossy(&field[..end]).into_owned())
     }
 
-    /// Guards a declared entry count against the bytes remaining: each entry
-    /// is at least `min_entry_bytes`, so a count that could not possibly fit
-    /// is rejected before any allocation.
+    /// Rejects counts exceeding remaining bytes at `min_entry_bytes` each.
     pub(crate) fn guard_count(&self, count: i32, min_entry_bytes: usize) -> Result<usize> {
         let count = usize::try_from(count).map_err(|_| Error::ImplausibleCount {
             count: count as usize,
@@ -177,16 +165,11 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Largest number of entries preallocated from a wire count.
-///
-/// A count is only proven to fit the bytes remaining at its minimum entry
-/// size, which can be far smaller than the decoded value (a 1-byte name
-/// becomes a 24-byte `String`). Vectors start at most this large and grow
-/// with entries actually decoded.
+/// Maximum initial capacity for a vector sized from a wire count.
 const MAX_PREALLOC: usize = 256;
 
-/// A vector preallocated for at most [`MAX_PREALLOC`] entries of an
-/// untrusted wire count.
+/// Allocates capacity for at most [`MAX_PREALLOC`] entries; the vector grows
+/// only with entries actually decoded.
 pub(crate) fn vec_for_count<T>(count: usize) -> Vec<T> {
     Vec::with_capacity(count.min(MAX_PREALLOC))
 }
@@ -211,7 +194,7 @@ impl Writer {
         self.buf.len()
     }
 
-    /// Overwrites four bytes already written at `at` with `v`.
+    /// Overwrites four previously written bytes at `at` with `v`.
     ///
     /// # Panics
     /// If fewer than four bytes were written at `at`; callers patch only a
@@ -300,9 +283,8 @@ impl Writer {
         Ok(())
     }
 
-    /// Writes a string into a fixed-`width` field, NUL-terminated and
-    /// zero-padded (mirror of [`Reader::fixed_cstr`]). The string is
-    /// truncated to `width - 1` bytes so the terminator always fits.
+    /// Writes a NUL-terminated, zero-padded field, truncating to `width - 1`
+    /// bytes. See [`Reader::fixed_cstr`].
     pub(crate) fn fixed_cstr(&mut self, s: &str, width: usize) {
         let take = s.len().min(width.saturating_sub(1));
         self.buf.extend_from_slice(&s.as_bytes()[..take]);

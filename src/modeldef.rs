@@ -1,35 +1,18 @@
-//! MODELDEF / data descriptions (message id 5).
+//! MODELDEF data descriptions (message id 5).
 //!
-//! NatNet has two MODELDEF envelopes. NatNet 3.x and 4.0 carry a dataset
-//! count followed by a type and an unframed body. NatNet 4.1 carries a body
-//! byte count after each type. The version-aware entry points below select the
-//! envelope explicitly; they never guess from payload bytes.
-//!
-//! Every dataset type the NatNet SDK 4.1.0.0 decodes has a public typed
-//! representation: marker sets (type 0, [`MarkerSetDef`]), rigid bodies
-//! (1, [`RigidBodyDef`]), skeletons (2, [`SkeletonDef`]), force plates
-//! (3, [`ForcePlateDef`]), devices (4, [`DeviceDef`]), cameras
-//! (5, [`CameraDef`]) and assets (6, [`AssetDef`]). Layouts follow the
-//! `PacketClient.cpp` description unpackers cited on each type. Types 2–6 are
-//! **spec-derived**: the real Motive captures this crate is checked against
-//! contain none of them, so their layouts are not yet confirmed against real
-//! Motive bytes. Unknown 4.1 dataset types are kept as [`DataSet::Other`].
-//!
-//! A legacy (3.x, 4.0) dataset has no body size; its extent is found by
-//! walking the same typed grammar that produces the typed value. A 4.1 body
-//! is bounded by its envelope. Type 0 residue after the known fields is
-//! dropped by [`ParsePolicy::Compatible`], and a type 1 tail is preserved
-//! verbatim including any opaque 4.1 suffix. A type 2–6 body must match its
-//! typed layout exactly: [`ParsePolicy::Strict`] rejects residue, truncation
-//! and malformed nested counts; [`ParsePolicy::Compatible`] instead keeps the
-//! body as [`DataSet::Other`] with its type id whenever the typed value would
-//! not re-encode to exactly the same bytes (malformed or residue-carrying 4.1
-//! bodies, and strings that are not valid UTF-8), so no bytes are lost.
-//! Compatible parsing also drops outer payload residue, which strict parsing
-//! rejects. Checked encoding writes the returned [`ModelDef`] value
-//! faithfully, so it reproduces the parsed bytes for every value parsed
-//! without dropped residue or lossy strings, and does not reproduce bytes
-//! that compatible decoding discarded from malformed input.
+//! - **Envelope:** NatNet 3.x and 4.0 carry a count, then type and body per
+//!   dataset; 4.1 adds a byte count after each type. The version picks the
+//!   envelope; payload bytes are never sniffed.
+//! - **Types:** 0–6 are typed; unknown 4.1 types become [`DataSet::Other`].
+//!   Layouts for types 2–6 are spec-derived, unconfirmed against Motive.
+//! - **Strict parsing** rejects residue, truncation and malformed counts.
+//! - **Compatible parsing** drops residue after type 0 fields and after the
+//!   payload, keeps type 1 tails verbatim, and (4.1 only) keeps a type 2–6
+//!   body that would not re-encode identically, including invalid UTF-8, as
+//!   [`DataSet::Other`]. Legacy layouts have no body size, so a malformed
+//!   body is an error there.
+//! - **Checked encoding** reproduces the parsed bytes, minus anything
+//!   compatible parsing discarded.
 
 use crate::bytes::{Reader, Writer, checked_i32, vec_for_count};
 use crate::error::{Error, Result};
@@ -65,23 +48,18 @@ pub struct MarkerSetDef {
 ///
 /// `tail` contains the version-dependent marker description after the common
 /// name/id/parent/offset fields. Compatible parsing keeps it byte-for-byte,
-/// including extensions that are not understood here. For the size-bounded
-/// 4.1 layout, strict parsing and checked encoding validate the mandatory
-/// marker prefix while preserving opaque suffix bytes. Legacy checked
-/// encoding requires the tail to end after that prefix because its envelope
-/// has no body size. Both layouts refuse a truncated or malformed prefix.
-/// Use [`ModelDef::to_payload_lossy`] only when intentionally retaining a
-/// tail that does not contain the selected layout's mandatory prefix.
-///
-/// The same type describes skeleton bones ([`SkeletonDef::rigid_bodies`]) and
-/// asset rigid bodies ([`AssetDef::rigid_bodies`]); there the tail must be
-/// exactly the marker description, with no suffix, in every layout.
+/// including unknown extensions. Strict parsing and checked encoding validate
+/// the mandatory prefix; 4.1 preserves suffixes, while legacy requires an
+/// exact tail because it has no body size. Both reject truncated or malformed
+/// prefixes. Use [`ModelDef::to_payload_lossy`] to retain an invalid tail.
+/// Skeleton bones and asset rigid bodies require an exact marker-description
+/// tail in every layout ([`SkeletonDef::rigid_bodies`], [`AssetDef::rigid_bodies`]).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RigidBodyDef {
     /// Rigid-body name.
     pub name: String,
-    /// Streaming id used in FrameOfData rigid bodies.
+    /// Streaming id for a top-level rigid body; in a skeleton, the bone index.
     pub id: i32,
     /// Parent id, or −1 for none.
     pub parent_id: i32,
@@ -93,14 +71,10 @@ pub struct RigidBodyDef {
 
 /// A skeleton data description (dataset type 2).
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackSkeletonDescription`: `cstr name`, `int32 id`,
-/// `int32 nRigidBodies`, then `nRigidBodies` rigid-body descriptions
-/// (`UnpackRigidBodyDescription`). Each bone is a [`RigidBodyDef`] whose
-/// [`tail`](RigidBodyDef::tail) is exactly the version-dependent marker
-/// description: no body size bounds an individual bone, so a bone tail never
-/// carries an opaque suffix. Spec-derived, not yet confirmed against real
-/// Motive bytes.
+/// Wire: `cstr name`, `int32 id`, `int32 nRigidBodies`, then that many
+/// rigid-body descriptions. Spec-derived (SDK `UnpackSkeletonDescription`),
+/// unconfirmed against real Motive bytes. Bone tails contain
+/// exactly the version-dependent marker description, with no opaque suffix.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SkeletonDef {
@@ -115,11 +89,8 @@ pub struct SkeletonDef {
 
 /// A force-plate data description (dataset type 3).
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackForcePlateDescription` (gated on NatNet >= 3.0, so present for
-/// every accepted version); field meanings from `NatNetTypes.h`
-/// `sForcePlateDescription`. Spec-derived, not yet confirmed against real
-/// Motive bytes.
+/// Spec-derived (SDK `UnpackForcePlateDescription`, `sForcePlateDescription`),
+/// unconfirmed against real Motive bytes.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ForcePlateDef {
@@ -148,10 +119,8 @@ pub struct ForcePlateDef {
 
 /// A peripheral-device data description (dataset type 4).
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackDeviceDescription` (gated on NatNet >= 3.0); field meanings from
-/// `NatNetTypes.h` `sDeviceDescription`. Spec-derived, not yet confirmed
-/// against real Motive bytes.
+/// Spec-derived (SDK `UnpackDeviceDescription`, `sDeviceDescription`),
+/// unconfirmed against real Motive bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceDef {
@@ -171,9 +140,8 @@ pub struct DeviceDef {
 
 /// A camera data description (dataset type 5).
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackCameraDescription`: `cstr name`, `[f32; 3]` position,
-/// `[f32; 4]` orientation. Spec-derived, not yet confirmed against real
+/// Wire: `cstr name`, `[f32; 3]` position, `[f32; 4]` orientation.
+/// Spec-derived (SDK `UnpackCameraDescription`), unconfirmed against real
 /// Motive bytes.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -188,10 +156,8 @@ pub struct CameraDef {
 
 /// A marker description inside an [`AssetDef`].
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackMarkerDescription`: `cstr name`, `int32 id`, `[f32; 3]` initial
-/// position, `f32 size`, `int16 params`. `params` is kept as the raw 16 bits
-/// (`NatNetTypes.h` documents bit 0 as *active*).
+/// Spec-derived layout: name, id, initial position, size, and raw 16-bit
+/// params (bit 0 is documented as active).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MarkerDef {
@@ -210,12 +176,8 @@ pub struct MarkerDef {
 /// An asset data description (dataset type 6), for example a trained marker
 /// set.
 ///
-/// Layout from NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackAssetDescription`: `cstr name`, `int32 asset_type`, `int32 id`,
-/// `int32 nRigidBodies`, rigid-body descriptions, `int32 nMarkers`, marker
-/// descriptions. Rigid bodies follow the same exact-tail rule as
-/// [`SkeletonDef`] bones. Spec-derived, not yet confirmed against real Motive
-/// bytes.
+/// Spec-derived and unconfirmed against real Motive bytes. Rigid bodies
+/// follow the same exact-tail rule as [`SkeletonDef`] bones.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AssetDef {
@@ -242,8 +204,7 @@ pub enum DataSet {
     RigidBody(RigidBodyDef),
     /// A skeleton description.
     Skeleton(SkeletonDef),
-    /// A force-plate description. Boxed: its 12x12 calibration matrix makes
-    /// it far larger than the other variants.
+    /// A force-plate description.
     ForcePlate(Box<ForcePlateDef>),
     /// A peripheral-device description.
     Device(DeviceDef),
@@ -251,9 +212,8 @@ pub enum DataSet {
     Camera(CameraDef),
     /// An asset description.
     Asset(AssetDef),
-    /// A dataset whose type or entry fields are kept verbatim: an unknown
-    /// NatNet 4.1 type, or a type 2–6 body that compatibility decoding could
-    /// not represent exactly (see the [module docs](self)).
+    /// A dataset kept verbatim: unknown 4.1 type or unrepresentable type 2–6
+    /// body (see the [module docs](self)).
     Other {
         /// The dataset type id.
         type_id: i32,
@@ -291,8 +251,8 @@ fn invalid_count(count: i32, offset: usize) -> Error {
     Error::InvalidCount { count, offset }
 }
 
-/// Reads a non-negative count and proves that its minimum representation can
-/// fit in the bytes remaining before any allocation or loop.
+/// Reads a count, checking `count * min_entry_bytes` fits in the remaining
+/// bytes before anything is allocated.
 fn count(r: &mut Reader<'_>, min_entry_bytes: usize) -> Result<usize> {
     let offset = r.position();
     let raw = r.i32()?;
@@ -319,7 +279,6 @@ fn size(r: &mut Reader<'_>) -> Result<usize> {
     Ok(size)
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackMarkersetDescription`.
 fn read_marker_set_def(r: &mut Reader<'_>) -> Result<MarkerSetDef> {
     let name = r.cstr()?;
     let n = count(r, 1)?;
@@ -330,8 +289,6 @@ fn read_marker_set_def(r: &mut Reader<'_>) -> Result<MarkerSetDef> {
     Ok(MarkerSetDef { name, marker_names })
 }
 
-/// Minimum rigid-body marker description entry: position and label, plus a
-/// one-byte name from NatNet 4.0.
 fn rigid_marker_min(layout: Layout) -> usize {
     if layout.rigid_body_marker_names() {
         17
@@ -340,10 +297,6 @@ fn rigid_marker_min(layout: Layout) -> usize {
     }
 }
 
-/// Walks the version-dependent marker description that follows a rigid-body
-/// description's offset (NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackRigidBodyDescription`): `int32 nMarkers`, `nMarkers` positions,
-/// `nMarkers` required active labels and, from NatNet 4.0, `nMarkers` names.
 fn walk_rigid_body_tail(r: &mut Reader<'_>, layout: Layout) -> Result<()> {
     let n = count(r, rigid_marker_min(layout))?;
     for _ in 0..n {
@@ -360,9 +313,6 @@ fn walk_rigid_body_tail(r: &mut Reader<'_>, layout: Layout) -> Result<()> {
     Ok(())
 }
 
-/// Reads a rigid-body description whose tail ends after the marker
-/// description: type 1 in the legacy envelope, skeleton bones and asset
-/// rigid bodies in every envelope.
 fn read_rigid_body_def(r: &mut Reader<'_>, layout: Layout) -> Result<RigidBodyDef> {
     let name = r.cstr()?;
     let id = r.i32()?;
@@ -380,11 +330,7 @@ fn read_rigid_body_def(r: &mut Reader<'_>, layout: Layout) -> Result<RigidBodyDe
     })
 }
 
-/// Minimum rigid-body description: a one-byte name, id, parent id, offset
-/// and marker count.
 const MIN_RIGID_BODY_DEF: usize = 25;
-/// Minimum asset marker description: a one-byte name, id, position, size and
-/// params.
 const MIN_MARKER_DEF: usize = 23;
 
 fn read_rigid_body_defs(r: &mut Reader<'_>, layout: Layout) -> Result<Vec<RigidBodyDef>> {
@@ -405,7 +351,6 @@ fn read_names(r: &mut Reader<'_>) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackSkeletonDescription`.
 fn read_skeleton_def(r: &mut Reader<'_>, layout: Layout) -> Result<SkeletonDef> {
     Ok(SkeletonDef {
         name: r.cstr()?,
@@ -414,7 +359,6 @@ fn read_skeleton_def(r: &mut Reader<'_>, layout: Layout) -> Result<SkeletonDef> 
     })
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackForcePlateDescription`.
 fn read_force_plate_def(r: &mut Reader<'_>) -> Result<ForcePlateDef> {
     let id = r.i32()?;
     let serial_number = r.cstr()?;
@@ -445,7 +389,6 @@ fn read_force_plate_def(r: &mut Reader<'_>) -> Result<ForcePlateDef> {
     })
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackDeviceDescription`.
 fn read_device_def(r: &mut Reader<'_>) -> Result<DeviceDef> {
     Ok(DeviceDef {
         id: r.i32()?,
@@ -457,7 +400,6 @@ fn read_device_def(r: &mut Reader<'_>) -> Result<DeviceDef> {
     })
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackCameraDescription`.
 fn read_camera_def(r: &mut Reader<'_>) -> Result<CameraDef> {
     Ok(CameraDef {
         name: r.cstr()?,
@@ -466,7 +408,6 @@ fn read_camera_def(r: &mut Reader<'_>) -> Result<CameraDef> {
     })
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackMarkerDescription`.
 fn read_marker_def(r: &mut Reader<'_>) -> Result<MarkerDef> {
     Ok(MarkerDef {
         name: r.cstr()?,
@@ -477,7 +418,6 @@ fn read_marker_def(r: &mut Reader<'_>) -> Result<MarkerDef> {
     })
 }
 
-/// NatNet SDK 4.1.0.0 `PacketClient.cpp` `UnpackAssetDescription`.
 fn read_asset_def(r: &mut Reader<'_>, layout: Layout) -> Result<AssetDef> {
     let name = r.cstr()?;
     let asset_type = r.i32()?;
@@ -497,9 +437,6 @@ fn read_asset_def(r: &mut Reader<'_>, layout: Layout) -> Result<AssetDef> {
     })
 }
 
-/// Reads a typed dataset of type 2–6 from the current position. This is the
-/// single grammar for those types: the legacy extent walker, strict and
-/// compatible parsing, and legacy validation of `Other` bodies all use it.
 fn read_described(type_id: i32, r: &mut Reader<'_>, layout: Layout) -> Result<Option<DataSet>> {
     Ok(Some(match type_id {
         TYPE_SKELETON => DataSet::Skeleton(read_skeleton_def(r, layout)?),
@@ -511,7 +448,6 @@ fn read_described(type_id: i32, r: &mut Reader<'_>, layout: Layout) -> Result<Op
     }))
 }
 
-/// Finds the extent of an unframed legacy dataset with the typed grammar.
 fn walk_dataset(r: &mut Reader<'_>, type_id: i32, layout: Layout, version: Version) -> Result<()> {
     match type_id {
         TYPE_MARKER_SET => {
@@ -542,8 +478,6 @@ fn validate_rigid_tail(tail: &[u8], layout: Layout) -> Result<()> {
     Ok(())
 }
 
-/// Bones and asset rigid bodies are delimited only by their grammar, so their
-/// tail must be exactly the marker description in every layout.
 fn validate_nested_rigid_tail(tail: &[u8], layout: Layout) -> Result<()> {
     let mut r = Reader::new(tail);
     walk_rigid_body_tail(&mut r, layout)?;
@@ -585,13 +519,6 @@ fn parse_rigid_body_reader(
     }))
 }
 
-/// Parses a bounded type 2–6 body (the whole remaining reader).
-///
-/// Strict parsing requires the typed grammar to consume the body exactly.
-/// Compatible parsing keeps the typed value only when checked re-encoding
-/// reproduces the body bytes exactly; otherwise (malformed, residue, or
-/// strings that are not valid UTF-8) it keeps the bytes as
-/// [`DataSet::Other`].
 fn parse_described_reader(
     type_id: i32,
     r: &mut Reader<'_>,
@@ -654,46 +581,25 @@ fn parse_dataset(
 }
 
 impl ModelDef {
-    /// Parses a MODELDEF datagram using the historical 4.1-compatible entry
-    /// point. It preserves opaque tails and tolerates compatible residue.
-    ///
-    /// # Errors
-    /// Returns a header, version, count, or dataset decoding error.
-    pub fn parse(datagram: &[u8]) -> Result<Self> {
-        Self::parse_with_policy(datagram, Version::V4_1, ParsePolicy::Compatible)
-    }
-
-    /// Parses a MODELDEF payload using the historical 4.1-compatible entry
-    /// point. It preserves opaque tails and tolerates compatible residue.
-    ///
-    /// # Errors
-    /// Returns a version, count, or dataset decoding error.
-    pub fn parse_payload(payload: &[u8]) -> Result<Self> {
-        Self::parse_payload_with_policy(payload, Version::V4_1, ParsePolicy::Compatible)
-    }
-
-    /// Parses a MODELDEF datagram with a negotiated version using compatible
-    /// validation. Use [`ModelDef::parse_with_policy`] for strict decoding.
+    /// Parses a MODELDEF datagram with compatible validation; use
+    /// [`Self::parse_with_policy`] for strict decoding.
     ///
     /// # Errors
     /// Returns a header, unsupported-version, count, or dataset decoding error.
-    pub fn parse_version(datagram: &[u8], version: Version) -> Result<Self> {
+    pub fn parse(datagram: &[u8], version: Version) -> Result<Self> {
         Self::parse_with_policy(datagram, version, ParsePolicy::Compatible)
     }
 
-    /// Parses a MODELDEF payload with a negotiated version using compatible
-    /// validation. Use [`ModelDef::parse_payload_with_policy`] for strict
-    /// decoding.
+    /// Parses a MODELDEF payload (bytes after the 4-byte header) with
+    /// compatible validation.
     ///
     /// # Errors
     /// Returns an unsupported-version, count, or dataset decoding error.
-    pub fn parse_payload_version(payload: &[u8], version: Version) -> Result<Self> {
+    pub fn parse_payload(payload: &[u8], version: Version) -> Result<Self> {
         Self::parse_payload_with_policy(payload, version, ParsePolicy::Compatible)
     }
 
-    /// Parses a MODELDEF datagram with an explicit version and validation
-    /// policy.
-    ///
+    /// Parses a datagram with an explicit version and validation policy.
     /// # Errors
     /// Returns a header, unsupported-version, count, or policy validation error.
     pub fn parse_with_policy(
@@ -704,9 +610,7 @@ impl ModelDef {
         Self::parse_payload_with_policy(message::expect(datagram, NAT_MODELDEF)?, version, policy)
     }
 
-    /// Parses a MODELDEF payload with an explicit version and validation
-    /// policy.
-    ///
+    /// Parses a payload with an explicit version and validation policy.
     /// # Errors
     /// Returns an unsupported-version, count, or policy validation error.
     pub fn parse_payload_with_policy(
@@ -743,76 +647,41 @@ impl ModelDef {
         Ok(Self { datasets })
     }
 
-    /// Serializes to a MODELDEF payload using the 4.1 layout.
+    /// Encodes a checked MODELDEF payload (without the four-byte header).
     ///
     /// # Errors
-    /// Returns a checked encoding error for an invalid string, count, dataset,
-    /// or rigid-body marker prefix.
-    pub fn to_payload(&self) -> Result<Vec<u8>> {
-        self.to_payload_version(Version::V4_1)
+    /// Returns an unsupported-version error, or a checked encoding error for an
+    /// invalid string, count, dataset, or rigid-body marker prefix.
+    pub fn to_payload(&self, version: Version) -> Result<Vec<u8>> {
+        self.encode_payload(version.layout()?, version)
     }
 
-    /// Serializes to a full MODELDEF datagram using the 4.1 layout.
+    /// Encodes a checked datagram (header plus payload).
     ///
     /// # Errors
-    /// Returns the checked payload encoding error, or the payload-size
-    /// overflow described on [`Self::to_datagram_version`].
-    pub fn to_datagram(&self) -> Result<Vec<u8>> {
-        self.to_datagram_version(Version::V4_1)
-    }
-
-    /// Serializes to a MODELDEF payload using a supported version layout.
-    ///
-    /// # Errors
-    /// Returns an unsupported-version or checked encoding error.
-    pub fn to_payload_version(&self, version: Version) -> Result<Vec<u8>> {
-        let layout = version.layout()?;
-        self.encode_payload(layout, version)
-    }
-
-    /// Serializes to a full MODELDEF datagram using a supported version
-    /// layout.
-    ///
-    /// # Errors
-    /// Returns an unsupported-version or checked payload encoding error, or
-    /// [`Error::LengthOverflow`] (`field: "message payload size"`) when the
-    /// payload is longer than the 65 535 bytes its `u16` header can declare.
-    pub fn to_datagram_version(&self, version: Version) -> Result<Vec<u8>> {
-        let payload = self.to_payload_version(version)?;
+    /// Same as [`Self::to_payload`], plus [`Error::LengthOverflow`] for a
+    /// payload above the 65 535-byte `u16` limit.
+    pub fn to_datagram(&self, version: Version) -> Result<Vec<u8>> {
+        let payload = self.to_payload(version)?;
         message::frame_checked(NAT_MODELDEF, &payload)
     }
 
-    /// Serializes with the historical infallible 4.1 behavior. This method
-    /// retains truncation, count saturation and type aliases for callers that
-    /// explicitly accept lossy compatibility behavior.
-    #[must_use]
-    pub fn to_payload_lossy(&self) -> Vec<u8> {
-        self.encode_payload_lossy(Layout::V4_1)
-    }
-
-    /// Serializes a full datagram with the historical infallible 4.1
-    /// behavior. A payload longer than 65 535 bytes is emitted in full behind
-    /// a saturated (`0xFFFF`) declared size.
-    #[must_use]
-    pub fn to_datagram_lossy(&self) -> Vec<u8> {
-        message::frame(NAT_MODELDEF, &self.to_payload_lossy())
-    }
-
-    /// Serializes with explicitly lossy behavior using a supported version.
+    /// Encodes a payload without value validation: strings may truncate and
+    /// counts may saturate or use type aliases.
     ///
     /// # Errors
-    /// Returns an unsupported-version error.
-    pub fn to_payload_lossy_version(&self, version: Version) -> Result<Vec<u8>> {
+    /// Returns [`Error::UnsupportedVersion`] for unsupported layouts.
+    pub fn to_payload_lossy(&self, version: Version) -> Result<Vec<u8>> {
         Ok(self.encode_payload_lossy(version.layout()?))
     }
 
-    /// Serializes a full datagram with explicitly lossy behavior using a
-    /// supported version.
+    /// Encodes without value validation. Payloads over 65 535 bytes are emitted
+    /// in full with a saturated declared size.
     ///
     /// # Errors
-    /// Returns an unsupported-version error.
-    pub fn to_datagram_lossy_version(&self, version: Version) -> Result<Vec<u8>> {
-        let payload = self.to_payload_lossy_version(version)?;
+    /// Returns [`Error::UnsupportedVersion`] for unsupported layouts.
+    pub fn to_datagram_lossy(&self, version: Version) -> Result<Vec<u8>> {
+        let payload = self.to_payload_lossy(version)?;
         Ok(message::frame(NAT_MODELDEF, &payload))
     }
 
@@ -874,8 +743,6 @@ impl ModelDef {
     }
 }
 
-/// Writes a checked name/id/parent/offset prefix; the caller validates and
-/// writes the tail.
 fn write_rigid_body_head(w: &mut Writer, rigid_body: &RigidBodyDef) -> Result<()> {
     w.try_cstr(&rigid_body.name, "rigid-body name")?;
     w.i32(rigid_body.id);
@@ -884,7 +751,6 @@ fn write_rigid_body_head(w: &mut Writer, rigid_body: &RigidBodyDef) -> Result<()
     Ok(())
 }
 
-/// Writes nested rigid-body descriptions whose tails must be exact.
 fn write_nested_rigid_bodies(
     w: &mut Writer,
     rigid_bodies: &[RigidBodyDef],

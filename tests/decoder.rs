@@ -70,7 +70,6 @@ fn strict_rejects_residue_compatible_accepts_it() {
             .parse(&wire)
             .is_ok()
     );
-    assert!(natnet::parse_message(&wire, Version::V4_1).is_ok());
 }
 
 #[test]

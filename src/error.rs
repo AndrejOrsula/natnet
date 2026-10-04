@@ -1,21 +1,14 @@
-//! The crate error type — hand-written to keep the core dependency-free
-//! (`thiserror` would be an external crate).
+//! Crate errors, defined here to keep the core dependency-free.
 
 /// A NatNet decode/encode failure.
 ///
-/// Offset-bearing variants identify the payload or string position described
-/// by the field. Count and residue variants retain their count/size context.
-/// Decoding is **total**: a truncated or otherwise malformed input returns one of these,
-/// never a panic (no indexing, no unchecked arithmetic on wire lengths).
+/// Offsets and count/size context identify where decoding or encoding failed.
+/// Malformed input returns an error rather than panicking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// A signed count or byte size read from the wire is negative.
-    ///
-    /// Returned under every [`ParsePolicy`](crate::ParsePolicy) for typed
-    /// counts and section sizes; only the count of an opaque 4.1 raw frame
-    /// section is retained, unvalidated, under
-    /// [`ParsePolicy::Compatible`](crate::ParsePolicy::Compatible).
+    /// A signed wire count or size is negative. Typed fields reject this under
+    /// every policy; compatible 4.1 decoding retains opaque raw-frame counts.
     InvalidCount {
         /// Signed value read from the wire.
         count: i32,
@@ -84,25 +77,21 @@ pub enum Error {
         /// Byte offset at which the string started.
         offset: usize,
     },
-    /// A declared section/dataset byte-size does not match the bytes its
-    /// entries actually consumed — the frame is internally inconsistent.
+    /// A section or dataset size differs from bytes consumed.
     SectionSizeMismatch {
         /// What the section header declared.
         declared: usize,
         /// What parsing the entries consumed.
         consumed: usize,
     },
-    /// A count field held a value too large to be plausible for the
-    /// remaining input (guards against a hostile length triggering a huge
-    /// allocation before the bytes are read).
+    /// A count cannot fit the remaining input.
     ImplausibleCount {
         /// The declared entry count.
         count: usize,
         /// Bytes remaining when it was read.
         available: usize,
     },
-    /// The 4-byte message header named a message id this parser was not
-    /// asked to decode as the expected type.
+    /// The message id differs from the expected id.
     UnexpectedMessageId {
         /// The id found in the header.
         found: u16,
@@ -116,8 +105,7 @@ pub enum Error {
         /// Minor protocol version found.
         minor: u8,
     },
-    /// Trailing bytes remained after a message that should have been fully
-    /// consumed (declared vs actual mismatch that is not size-tolerated).
+    /// Strict decoding found trailing bytes after a payload, including SERVERINFO.
     TrailingBytes {
         /// Bytes left unconsumed.
         remaining: usize,

@@ -134,8 +134,7 @@ fn known_bodies(rigid_marker_name: Option<&str>) -> Vec<(i32, Vec<u8>)> {
     ]
 }
 
-/// The typed values the literal bodies of `known_bodies` describe, for
-/// dataset types 2 to 6, written independently of the wire helpers above.
+/// Typed values matching the literal bodies for dataset types 2–6.
 fn known_typed(rigid_marker_name: Option<&str>) -> Vec<DataSet> {
     let bone = |name: &str| {
         let mut tail = 1i32.to_le_bytes().to_vec();
@@ -233,7 +232,7 @@ fn sized_payload(datasets: &[(i32, Vec<u8>)]) -> Vec<u8> {
 fn literal_legacy_marker_set_fixture_uses_count_type_body_envelope() {
     // 4-byte dataset count, type 0, "x\0", and a zero marker count.
     let payload = [1, 0, 0, 0, 0, 0, 0, 0, b'x', 0, 0, 0, 0, 0];
-    let parsed = ModelDef::parse_payload_version(&payload, Version::new(3, 0, 0, 0))
+    let parsed = ModelDef::parse_payload(&payload, Version::new(3, 0, 0, 0))
         .expect("legacy marker-set payload");
     assert_eq!(
         parsed.datasets,
@@ -285,7 +284,7 @@ fn legacy_nonempty_known_types_are_typed_and_bytes_preserved() {
         let rigid_marker_name = (version.major == 4).then_some("marker");
         let bodies = known_bodies(rigid_marker_name);
         let payload = legacy_payload(&bodies);
-        let parsed = ModelDef::parse_payload_version(&payload, version).expect("legacy datasets");
+        let parsed = ModelDef::parse_payload(&payload, version).expect("legacy datasets");
         assert_eq!(parsed.datasets.len(), 7);
         assert!(matches!(parsed.datasets[0], DataSet::MarkerSet(_)));
         assert!(matches!(parsed.datasets[1], DataSet::RigidBody(_)));
@@ -304,9 +303,7 @@ fn legacy_nonempty_known_types_are_typed_and_bytes_preserved() {
             );
         }
 
-        let reencoded = parsed
-            .to_payload_version(version)
-            .expect("checked legacy encoding");
+        let reencoded = parsed.to_payload(version).expect("checked legacy encoding");
         assert_eq!(reencoded, payload);
     }
 }
@@ -325,7 +322,7 @@ fn v4_1_sized_nonempty_known_bodies_use_same_independent_fixture() {
         ModelDef::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Compatible),
         Ok(parsed.clone())
     );
-    assert_eq!(parsed.to_payload_version(Version::V4_1), Ok(payload));
+    assert_eq!(parsed.to_payload(Version::V4_1), Ok(payload));
 }
 
 #[test]
@@ -333,8 +330,8 @@ fn v4_0_rigid_body_names_are_included_without_dataset_sizes() {
     let mut body = Vec::new();
     append_rigid_body(&mut body, "body", Some("marker"));
     let payload = legacy_payload(&[(TYPE_RIGID_BODY, body.clone())]);
-    let parsed = ModelDef::parse_payload_version(&payload, Version::new(4, 0, 0, 0))
-        .expect("4.0 rigid body");
+    let parsed =
+        ModelDef::parse_payload(&payload, Version::new(4, 0, 0, 0)).expect("4.0 rigid body");
     let DataSet::RigidBody(rigid_body) = &parsed.datasets[0] else {
         panic!("type 1 should be typed");
     };
@@ -342,7 +339,7 @@ fn v4_0_rigid_body_names_are_included_without_dataset_sizes() {
     assert_eq!(rigid_body.tail, body[tail_start..]);
     assert_eq!(
         parsed
-            .to_payload_version(Version::new(4, 0, 0, 0))
+            .to_payload(Version::new(4, 0, 0, 0))
             .expect("4.0 checked encoding"),
         payload
     );
@@ -353,7 +350,7 @@ fn v4_1_sizes_bound_unknown_and_known_opaque_bodies() {
     let unknown = vec![0xde, 0xad, 0xbe, 0xef];
     let camera = vec![1, 2, 3, 4, 5];
     let payload = sized_payload(&[(TYPE_CAMERA, camera.clone()), (99, unknown.clone())]);
-    let parsed = ModelDef::parse_payload_version(&payload, Version::V4_1).expect("4.1 payload");
+    let parsed = ModelDef::parse_payload(&payload, Version::V4_1).expect("4.1 payload");
     assert_eq!(
         parsed.datasets,
         vec![
@@ -368,9 +365,7 @@ fn v4_1_sizes_bound_unknown_and_known_opaque_bodies() {
         ]
     );
     assert_eq!(
-        parsed
-            .to_payload_version(Version::V4_1)
-            .expect("4.1 encode"),
+        parsed.to_payload(Version::V4_1).expect("4.1 encode"),
         payload
     );
 }
@@ -383,7 +378,7 @@ fn compatible_rigid_body_parse_keeps_opaque_tail_but_checked_encode_rejects_it()
     append_vec3(&mut body, [0.0, 0.0, 0.0]);
     body.extend_from_slice(&[7, 8, 9]);
     let payload = sized_payload(&[(TYPE_RIGID_BODY, body.clone())]);
-    assert!(ModelDef::parse_payload_version(&payload, Version::V4_1).is_ok());
+    assert!(ModelDef::parse_payload(&payload, Version::V4_1).is_ok());
     let parsed =
         ModelDef::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Compatible)
             .expect("compatible opaque tail");
@@ -398,8 +393,11 @@ fn compatible_rigid_body_parse_keeps_opaque_tail_but_checked_encode_rejects_it()
             | Error::ImplausibleCount { .. }
             | Error::TrailingBytes { .. },)
     ));
-    assert!(parsed.to_payload().is_err());
-    assert_eq!(parsed.to_payload_lossy(), payload);
+    assert!(parsed.to_payload(Version::V4_1).is_err());
+    assert_eq!(
+        parsed.to_payload_lossy(Version::V4_1).expect("4.1 encodes"),
+        payload
+    );
 }
 
 #[test]
@@ -413,7 +411,10 @@ fn strict_rigid_body_prefix_validation_keeps_opaque_suffix() {
     let payload = sized_payload(&[(TYPE_RIGID_BODY, body)]);
     let parsed = ModelDef::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Strict)
         .expect("valid prefix plus opaque suffix");
-    assert_eq!(parsed.to_payload().expect("checked encoding"), payload);
+    assert_eq!(
+        parsed.to_payload(Version::V4_1).expect("checked encoding"),
+        payload
+    );
 }
 
 #[test]
@@ -428,9 +429,9 @@ fn legacy_checked_encode_rejects_rigid_tail_suffix_but_v4_1_preserves_it() {
     let parsed = ModelDef::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Strict)
         .expect("4.1 opaque suffix");
 
-    assert_eq!(parsed.to_payload_version(Version::V4_1), Ok(payload));
+    assert_eq!(parsed.to_payload(Version::V4_1), Ok(payload));
     assert!(matches!(
-        parsed.to_payload_version(Version::new(4, 0, 0, 0)),
+        parsed.to_payload(Version::new(4, 0, 0, 0)),
         Err(Error::TrailingBytes { remaining: 1 })
     ));
 }
@@ -441,8 +442,8 @@ fn strict_policy_rejects_marker_residue_and_negative_dataset_count() {
     marker_body.extend_from_slice(&i32_bytes(0));
     marker_body.push(0xaa);
     let payload = sized_payload(&[(0, marker_body)]);
-    let parsed = ModelDef::parse_payload_version(&payload, Version::V4_1)
-        .expect("compatible marker residue");
+    let parsed =
+        ModelDef::parse_payload(&payload, Version::V4_1).expect("compatible marker residue");
     assert_eq!(
         parsed.datasets,
         vec![DataSet::MarkerSet(MarkerSetDef {
@@ -455,7 +456,12 @@ fn strict_policy_rejects_marker_residue_and_negative_dataset_count() {
         body.extend_from_slice(&i32_bytes(0));
         body
     })]);
-    assert_eq!(parsed.to_payload().expect("canonical encoding"), canonical);
+    assert_eq!(
+        parsed
+            .to_payload(Version::V4_1)
+            .expect("canonical encoding"),
+        canonical
+    );
     assert!(matches!(
         ModelDef::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Strict),
         Err(Error::TrailingBytes { remaining: 1 })
@@ -464,7 +470,7 @@ fn strict_policy_rejects_marker_residue_and_negative_dataset_count() {
     let mut top_level_residue = canonical.clone();
     top_level_residue.push(0xbb);
     assert_eq!(
-        ModelDef::parse_payload_version(&top_level_residue, Version::V4_1)
+        ModelDef::parse_payload(&top_level_residue, Version::V4_1)
             .expect("compatible top-level residue"),
         parsed
     );
@@ -521,13 +527,13 @@ fn checked_aliases_and_unknown_legacy_types_are_rejected() {
         }],
     };
     assert!(matches!(
-        alias.to_payload().unwrap_err(),
+        alias.to_payload(Version::V4_1).unwrap_err(),
         Error::InvalidValue { .. }
     ));
 
     let payload = legacy_payload(&[(123, vec![1, 2, 3])]);
     assert!(matches!(
-        ModelDef::parse_payload_version(&payload, Version::new(3, 1, 0, 0)),
+        ModelDef::parse_payload(&payload, Version::new(3, 1, 0, 0)),
         Err(Error::UnsupportedDataSet { type_id: 123, .. })
     ));
 }
@@ -536,11 +542,11 @@ fn checked_aliases_and_unknown_legacy_types_are_rejected() {
 fn unsupported_minor_is_rejected_without_payload_guessing() {
     let payload = i32_bytes(0);
     assert!(matches!(
-        ModelDef::parse_payload_version(&payload, Version::new(4, 2, 0, 0)),
+        ModelDef::parse_payload(&payload, Version::new(4, 2, 0, 0)),
         Err(Error::UnsupportedVersion { major: 4, minor: 2 })
     ));
     assert!(matches!(
-        ModelDef { datasets: vec![] }.to_payload_version(Version::new(3, 2, 0, 0)),
+        ModelDef { datasets: vec![] }.to_payload(Version::new(3, 2, 0, 0)),
         Err(Error::UnsupportedVersion { major: 3, minor: 2 })
     ));
 }
@@ -553,19 +559,15 @@ fn checked_modeldef_datagram_refuses_a_payload_its_header_cannot_declare() {
             marker_names: vec!["m".repeat(99); 700],
         })],
     };
-    let payload = model.to_payload().unwrap();
+    let payload = model.to_payload(Version::V4_1).unwrap();
     assert!(payload.len() > usize::from(u16::MAX));
     let overflow = Err(Error::LengthOverflow {
         field: "message payload size",
         length: payload.len(),
         max: 65_535,
     });
-    assert_eq!(model.to_datagram().map(|d| d.len()), overflow);
-    assert_eq!(
-        model.to_datagram_version(Version::V4_1).map(|d| d.len()),
-        overflow
-    );
-    let lossy = model.to_datagram_lossy();
+    assert_eq!(model.to_datagram(Version::V4_1).map(|d| d.len()), overflow);
+    let lossy = model.to_datagram_lossy(Version::V4_1).expect("4.1 encodes");
     assert_eq!(&lossy[..4], &[5, 0, 0xff, 0xff]);
     assert_eq!(&lossy[4..], payload.as_slice());
 }

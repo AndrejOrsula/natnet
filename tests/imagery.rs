@@ -6,14 +6,11 @@
 //! a header longer than this crate knows is skipped, and a header shorter
 //! than it knows is refused.
 //!
-//! Encoding is fallible now, so the round-trip above is a guarantee rather
-//! than a hope: the values a serializer would have to distort are refused
-//! instead. Those refusals have their own section below.
+//! Encoding is fallible: values a serializer would have to distort are
+//! refused. Those refusals have their own section below.
 //!
-//! One **golden byte vector** is asserted verbatim. It is the anti-drift
-//! instrument between this decoder and the `motive-bridge` encoder: if either
-//! side moves a field, this literal stops matching. Do not regenerate it from
-//! the code under test.
+//! One golden byte vector guards the wire layout independently of the code
+//! under test.
 
 #![cfg(feature = "imagery")]
 #![allow(
@@ -27,7 +24,7 @@ use natnet::imagery::{
     KIND_IMAGE_FRAME, MAGIC, MODE_LISTEN, PREFIX_LEN, PROTO_MAJOR, PROTO_MINOR, Record,
     encode_record, parse_record, record_len,
 };
-use natnet::{FrameOfData, Message, SyntheticServer, Version, parse_message};
+use natnet::{Decoder, FrameOfData, Message, SyntheticServer, Version};
 
 // ---------------------------------------------------------------- fixtures
 
@@ -45,7 +42,7 @@ fn sample_hello() -> Hello {
         host_wall_unix_secs: 1_612_137_600,
         mode: MODE_LISTEN,
         camera_count: 14,
-        bridge_id: "lunalab-bridge".to_string(),
+        bridge_id: "example-bridge".to_string(),
         profile: r"C:\ProgramData\OptiTrack\MotiveProfile.motive".to_string(),
         calibration: r"C:\ProgramData\OptiTrack\Motive\System Calibration.cal".to_string(),
     }
@@ -82,7 +79,7 @@ fn sample_camera_desc(rays: &[u8]) -> CameraDesc<'_> {
     }
 }
 
-fn sample_image<'a>(payload: &'a [u8], mid: Option<u64>) -> ImageFrame<'a> {
+fn sample_image(payload: &[u8], mid: Option<u64>) -> ImageFrame<'_> {
     ImageFrame {
         frame_number: 15_732_032,
         camera_index: 3,
@@ -421,11 +418,7 @@ fn encoding_tags_round_trip_through_the_wire_byte() {
 
 #[test]
 fn a_ray_grid_that_does_not_match_the_rays_is_refused_at_encode() {
-    // A 1x1 grid declares 24 bytes of rays. With `rays: &[]` and a 32-byte
-    // name this record used to encode `Ok` *and parse back `Ok`*, returning
-    // the first 24 bytes of the name as "rays" and a name truncated to its
-    // last 8 — a wrong value, no error, and a refutation of the round-trip
-    // invariant this module states about itself.
+    // A mismatched grid must fail instead of consuming bytes from the name.
     let name = "0123456789abcdef0123456789abcdef";
     assert_eq!(name.len(), 32);
 
@@ -503,9 +496,7 @@ fn a_camera_name_with_an_interior_nul_is_refused_at_encode() {
 
 #[test]
 fn a_hello_string_longer_than_its_length_prefix_is_refused_at_encode() {
-    // The length-prefixed writer used to narrow the u16 prefix *and* the
-    // bytes, so a 70 000-byte bridge_id parsed back as a 65 535-byte one —
-    // and the cut could land in the middle of a UTF-8 sequence.
+    // The length prefix cannot truncate the string or split a UTF-8 sequence.
     let mut hello = sample_hello();
     hello.bridge_id = "x".repeat(70_000);
     let err = hello.to_record().unwrap_err();
@@ -531,10 +522,7 @@ fn a_hello_string_longer_than_its_length_prefix_is_refused_at_encode() {
 
 #[test]
 fn a_header_too_long_for_its_length_field_is_refused_at_encode() {
-    // `encode_record` used to narrow the u16 header_len while still appending
-    // every header byte: a 70 000-byte header wrote a 70 016-byte record that
-    // declared a 65 551-byte one, so a reader advancing by the declared
-    // length landed 4 465 bytes inside the record and never resynchronised.
+    // The header length must match the bytes appended to the record.
     let header = vec![0xAAu8; 70_000];
     let err = encode_record(9_999, &header, b"tail").unwrap_err();
     assert!(
@@ -665,7 +653,11 @@ fn an_image_frame_joins_the_natnet_frame_of_the_same_number() {
     let datagram = server
         .datagram(15_732_032, 1.5, &[])
         .expect("valid frame encodes");
-    let Message::FrameOfData(fod) = parse_message(&datagram, Version::V4_1).expect("parse natnet")
+    let Message::FrameOfData(fod) = Decoder::new(Version::V4_1)
+        .expect("supported")
+        .parse(&datagram)
+        .map(natnet::DecodedMessage::into_message)
+        .expect("parse natnet")
     else {
         panic!("expected FrameOfData");
     };
@@ -704,8 +696,11 @@ fn the_join_survives_the_wrap_that_try_from_would_drop() {
         let datagram = server
             .datagram(natnet_frame_number, 1.0, &[])
             .expect("valid frame encodes");
-        let Message::FrameOfData(fod) =
-            parse_message(&datagram, Version::V4_1).expect("parse natnet")
+        let Message::FrameOfData(fod) = Decoder::new(Version::V4_1)
+            .expect("supported")
+            .parse(&datagram)
+            .map(natnet::DecodedMessage::into_message)
+            .expect("parse natnet")
         else {
             panic!("expected FrameOfData");
         };

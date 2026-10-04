@@ -1,8 +1,7 @@
 //! Deterministic payload reach and mutation regressions for the public parsers.
 //!
-//! The fixtures in this file are assembled from the wire fields directly. They
-//! do not use a serializer as their control, so a serializer/parser pair can
-//! not make both sides of a regression agree by sharing one mistake.
+//! Fixtures are assembled from wire fields, not serializers, so a
+//! serializer/parser pair cannot share the same mistake.
 
 #![allow(clippy::expect_used)]
 
@@ -206,15 +205,30 @@ fn valid_envelopes_dispatch_and_ignore_telemetry_size() {
     let model_datagram = envelope(natnet::NAT_MODELDEF, u16::MAX, &model);
     let frame_datagram = envelope(natnet::NAT_FRAMEOFDATA, 1, &frame);
 
-    let parsed_server = natnet::parse_message(&server_datagram, Version::V4_1).expect("SERVERINFO");
+    let parsed_server = natnet::Decoder::new(Version::V4_1)
+        .expect("supported")
+        .with_policy(natnet::ParsePolicy::Compatible)
+        .parse(&server_datagram)
+        .map(natnet::DecodedMessage::into_message)
+        .expect("SERVERINFO");
     assert!(
         matches!(parsed_server, Message::ServerInfo(info) if info.application_name == "Motive")
     );
 
-    let parsed_model = natnet::parse_message(&model_datagram, Version::V4_1).expect("MODELDEF");
+    let parsed_model = natnet::Decoder::new(Version::V4_1)
+        .expect("supported")
+        .with_policy(natnet::ParsePolicy::Compatible)
+        .parse(&model_datagram)
+        .map(natnet::DecodedMessage::into_message)
+        .expect("MODELDEF");
     assert!(matches!(parsed_model, Message::ModelDef(def) if def.datasets.len() == 2));
 
-    let parsed_frame = natnet::parse_message(&frame_datagram, Version::V4_1).expect("frame");
+    let parsed_frame = natnet::Decoder::new(Version::V4_1)
+        .expect("supported")
+        .with_policy(natnet::ParsePolicy::Compatible)
+        .parse(&frame_datagram)
+        .map(natnet::DecodedMessage::into_message)
+        .expect("frame");
     assert!(matches!(parsed_frame, Message::FrameOfData(frame) if frame.frame_number == 42));
 
     let command_datagram = envelope(natnet::NAT_RESPONSE, 0, &command_payload());
@@ -237,7 +251,12 @@ fn valid_envelopes_dispatch_and_ignore_telemetry_size() {
 fn unknown_id_preserves_bytes_and_declared_size_is_telemetry() {
     let payload = [0x00, 0x7f, 0xa5, 0xff];
     let datagram = envelope(0xbeef, 0, &payload);
-    let parsed = natnet::parse_message(&datagram, Version::V4_1).expect("unknown message");
+    let parsed = natnet::Decoder::new(Version::V4_1)
+        .expect("supported")
+        .with_policy(natnet::ParsePolicy::Compatible)
+        .parse(&datagram)
+        .map(natnet::DecodedMessage::into_message)
+        .expect("unknown message");
     assert!(matches!(
         parsed,
         Message::Other { id: 0xbeef, payload: got } if got == payload
@@ -253,9 +272,9 @@ fn every_typed_seed_is_safely_truncated_at_each_byte() {
     });
 
     let model = model_payload();
-    assert!(ModelDef::parse_payload(&model).is_ok());
+    assert!(ModelDef::parse_payload(&model, Version::V4_1).is_ok());
     assert_prefixes_error("MODELDEF payload", &model, |bytes| {
-        ModelDef::parse_payload(bytes).is_err()
+        ModelDef::parse_payload(bytes, Version::V4_1).is_err()
     });
 
     let server = server_payload();
@@ -350,7 +369,7 @@ fn structured_mutations_reach_meaningful_error_classes() {
     let mut model_count = model.clone();
     model_count[0..4].copy_from_slice(&(-1i32).to_le_bytes());
     assert!(matches!(
-        ModelDef::parse_payload(&model_count),
+        ModelDef::parse_payload(&model_count, Version::V4_1),
         Err(Error::ImplausibleCount { .. } | Error::InvalidCount { .. })
     ));
 
@@ -361,7 +380,7 @@ fn structured_mutations_reach_meaningful_error_classes() {
         }
     }
     assert!(matches!(
-        ModelDef::parse_payload(&model_name),
+        ModelDef::parse_payload(&model_name, Version::V4_1),
         Err(Error::UnterminatedString { .. })
     ));
 
@@ -461,10 +480,10 @@ fn explicit_parse_policy_pins_compatibility_and_strict_errors() {
     );
 
     let model = model_payload();
-    assert!(ModelDef::parse_payload_version(&model, Version::V4_1).is_ok());
-    let mut model_suffix = model.clone();
+    assert!(ModelDef::parse_payload(&model, Version::V4_1).is_ok());
+    let mut model_suffix = model;
     model_suffix.push(0xdd);
-    assert!(ModelDef::parse_payload(&model_suffix).is_ok());
+    assert!(ModelDef::parse_payload(&model_suffix, Version::V4_1).is_ok());
     assert!(matches!(
         ModelDef::parse_payload_with_policy(&model_suffix, Version::V4_1, ParsePolicy::Strict),
         Err(Error::TrailingBytes { remaining: 1 })
@@ -497,7 +516,7 @@ fn deterministic_byte_mutations_never_panic_at_each_entrypoint() {
         "MODELDEF payload",
         &model,
         |bytes| {
-            let _ = ModelDef::parse_payload(bytes);
+            let _ = ModelDef::parse_payload(bytes, Version::V4_1);
         },
         &[0, 4, 8, 12, 16, model.len() - 1],
     );

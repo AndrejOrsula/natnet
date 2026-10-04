@@ -1,19 +1,7 @@
-//! Round-trip tests over synthetic (spec-derived) values, plus the SERVERINFO
-//! NUL-stop behaviour and version branching.
+//! Round-trip tests for accepted values, float edge cases, and version layouts.
 //!
-//! The rule under test is the **qualified** one the crate documents —
-//! `parse(serialize(x)) == x` for an `x` one of the three NatNet message
-//! parsers produced and a serializer accepts, modulo IEEE-754 float equality
-//! — not an unconditional round trip, and not a rule over every parser this
-//! crate exposes.
-//! NaN behavior and explicitly lossy compatibility encoders each get a test below:
-//! what still holds and what stops holding. A wire NaN reproduces the payload
-//! bytes exactly *and* loses value equality; asserting either half alone
-//! passes vacuously. See the crate-level docs and `natnet::frame`'s
-//! *Round-trip, and the NaN a frame can carry*.
-//!
-//! These fixtures are fabricated: the repository carries only synthetic,
-//! spec-derived fixtures (see CONTRIBUTING.md).
+//! Fixtures are synthetic. Checked encoders preserve accepted values and
+//! wire bytes; lossy encoders have separate coverage.
 
 use natnet::frame::{FrameTiming, LabeledMarker, MarkerSet, RawSection, RigidBody};
 use natnet::generate::{PlannedBody, SyntheticServer};
@@ -84,19 +72,13 @@ fn sample_frame() -> FrameOfData {
 }
 
 #[test]
-fn frame_round_trips_at_v4_1() {
+fn frame_round_trips_as_datagram_and_payload() {
     let f = sample_frame();
     let bytes = f.to_datagram(Version::V4_1).expect("fixture encodes");
     let back = FrameOfData::parse(&bytes, Version::V4_1).expect("parse");
     assert_eq!(f, back);
     assert!(!back.rigid_bodies[0].tracking_valid());
-}
-
-#[test]
-fn frame_payload_round_trips() {
-    let f = sample_frame();
-    let payload = f.to_payload(Version::V4_1).expect("fixture encodes");
-    let back = FrameOfData::parse_payload(&payload, Version::V4_1).expect("parse");
+    let back = FrameOfData::parse_payload(&bytes[4..], Version::V4_1).expect("parse payload");
     assert_eq!(f, back);
 }
 
@@ -157,9 +139,7 @@ fn serverinfo_round_trips() {
 
 #[test]
 fn serverinfo_name_field_stops_at_first_nul() {
-    // A 256-byte name field carrying `Motive\0` then stale server-buffer
-    // bytes (an address-like fragment), exactly the real gotcha. Decoding
-    // must stop at the first NUL.
+    // Bytes after the first NUL are ignored.
     let mut payload = Vec::new();
     let mut name = vec![0u8; 256];
     name[..6].copy_from_slice(b"Motive");
@@ -210,7 +190,11 @@ fn sample_modeldef() -> ModelDef {
 #[test]
 fn modeldef_round_trips_and_resolves_names() {
     let m = sample_modeldef();
-    let back = ModelDef::parse(&m.to_datagram().expect("fixture encodes")).expect("parse");
+    let back = ModelDef::parse(
+        &m.to_datagram(Version::V4_1).expect("fixture encodes"),
+        Version::V4_1,
+    )
+    .expect("parse");
     assert_eq!(m, back);
     assert_eq!(back.resolve_rigid_body("CW-500 wand"), Some(3));
     assert_eq!(back.resolve_rigid_body("nonexistent"), None);
@@ -219,11 +203,8 @@ fn modeldef_round_trips_and_resolves_names() {
 }
 
 // ---------------------------------------------------------------------------
-// NaN and lossy compatibility behavior, and the neighbours
-// that are *not* exceptions. Every test below asserts a pair: what still
-// holds beside what stops holding, because either half alone passes vacuously
-// — a byte-equality assertion passes on a frame with no NaN in it, and an
-// inequality assertion passes on a frame that failed to parse.
+// NaN and lossy compatibility behavior. Tests include controls to show that
+// byte equality and value equality fail only in the cases under examination.
 // ---------------------------------------------------------------------------
 
 /// The byte offset of the one occurrence of `pat`, asserting it is the only
@@ -380,13 +361,15 @@ fn an_interior_nul_in_a_marker_set_name_costs_the_round_trip_either_way() {
 
     // Case one, and the common one: the marker count is read from the wrong
     // four bytes, is implausible, and the payload is refused outright.
-    let mut f = sample_frame();
-    f.marker_sets[0].name = "a\0b".to_string();
+    let mut refused = sample_frame();
+    refused.marker_sets[0].name = "a\0b".to_string();
     assert!(matches!(
-        f.to_payload(v),
+        refused.to_payload(v),
         Err(natnet::Error::InteriorNul { .. })
     ));
-    let wire = f.to_payload_lossy(v).expect("supported fixture layout");
+    let wire = refused
+        .to_payload_lossy(v)
+        .expect("supported fixture layout");
     assert!(
         !wire.is_empty(),
         "explicit lossy encoding reproduces the old defect"
@@ -396,22 +379,23 @@ fn an_interior_nul_in_a_marker_set_name_costs_the_round_trip_either_way() {
         "an interior NUL desynchronises the payload"
     );
 
-    // Case two — and this is why the module docs do *not* say an interior NUL
-    // always fails to parse. Choose the name so the shifted count and the
-    // section's declared size agree: the entry writes (len+1) + 4 + 12*m
-    // bytes and the desynchronised read consumes 2 + 4 + 12*c, so len = 13,
-    // m = 0, c = 1 balances. It parses `Ok` — into a *different* frame.
+    // This name makes the shifted count and declared section size agree:
+    // the entry writes (len+1) + 4 + 12*m bytes, while the shifted read
+    // consumes 2 + 4 + 12*c. With len = 13, m = 0 and c = 1, parsing succeeds
+    // but produces a different frame.
     let mut name = vec![b'A', 0];
     name.extend_from_slice(&1i32.to_le_bytes());
     name.extend_from_slice(b"abcdefg");
     assert_eq!(name.len(), 13);
-    let mut h = sample_frame();
-    h.marker_sets[0].name = String::from_utf8(name).expect("valid UTF-8");
-    h.marker_sets[0].markers = Vec::new();
-    assert!(h.to_payload(v).is_err());
-    let wire = h.to_payload_lossy(v).expect("supported fixture layout");
+    let mut shifted = sample_frame();
+    shifted.marker_sets[0].name = String::from_utf8(name).expect("valid UTF-8");
+    shifted.marker_sets[0].markers = Vec::new();
+    assert!(shifted.to_payload(v).is_err());
+    let wire = shifted
+        .to_payload_lossy(v)
+        .expect("supported fixture layout");
     let back = FrameOfData::parse_payload(&wire, v).expect("this one does parse");
-    assert_ne!(back, h, "and it is not the frame that was serialized");
+    assert_ne!(back, shifted, "and it is not the frame that was serialized");
     assert_eq!(back.marker_sets[0].name, "A", "the name stops at the NUL");
     assert_eq!(
         back.marker_sets[0].markers.len(),
@@ -425,10 +409,10 @@ fn an_interior_nul_in_a_marker_set_name_costs_the_round_trip_either_way() {
 
     // Reach control: the same shape with the NUL removed parses and is equal,
     // so the failure tracks the NUL and not the fixture.
-    let mut g = sample_frame();
-    g.marker_sets[0].name = "ab".to_string();
-    let w = g.to_payload(v).expect("fixture encodes");
-    assert_eq!(FrameOfData::parse_payload(&w, v).expect("parse"), g);
+    let mut control = sample_frame();
+    control.marker_sets[0].name = "ab".to_string();
+    let w = control.to_payload(v).expect("fixture encodes");
+    assert_eq!(FrameOfData::parse_payload(&w, v).expect("parse"), control);
 }
 
 #[test]
@@ -439,8 +423,12 @@ fn an_interior_nul_in_a_modeldef_name_breaks_the_round_trip_both_ways() {
     };
     rb.name = "r\0b".to_string();
 
-    assert!(m.to_datagram().is_err());
-    let back = ModelDef::parse(&m.to_datagram_lossy()).expect("it serializes and parses Ok");
+    assert!(m.to_datagram(Version::V4_1).is_err());
+    let back = ModelDef::parse(
+        &m.to_datagram_lossy(Version::V4_1).expect("4.1 encodes"),
+        Version::V4_1,
+    )
+    .expect("it serializes and parses Ok");
     assert_ne!(back, m, "the same bytes, an unequal value, and no NaN");
     let DataSet::RigidBody(rb) = &back.datasets[0] else {
         panic!("it comes back a rigid body, just a different one");
@@ -451,26 +439,26 @@ fn an_interior_nul_in_a_modeldef_name_breaks_the_round_trip_both_ways() {
         "no NaN anywhere: this is the string exception, not the float one"
     );
 
-    // The same NUL in a marker-set name shifts the marker *count* instead,
-    // and that is where the module docs need both halves. Usually the count
-    // read from the wrong four bytes is implausible and the reply is refused…
+    // In a marker-set name, the NUL shifts the marker count. Usually the
+    // shifted count is implausible and parsing fails.
     let mut ms = sample_modeldef();
     let DataSet::MarkerSet(msd) = &mut ms.datasets[1] else {
         panic!("dataset 1 of the fixture is the marker set");
     };
     msd.name = "r\0b".to_string();
-    assert!(ms.to_datagram().is_err());
+    assert!(ms.to_datagram(Version::V4_1).is_err());
     assert!(
-        ModelDef::parse(&ms.to_datagram_lossy()).is_err(),
+        ModelDef::parse(
+            &ms.to_datagram_lossy(Version::V4_1).expect("4.1 encodes"),
+            Version::V4_1
+        )
+        .is_err(),
         "the shifted count is implausible, so this one is refused"
     );
 
-    // …but "refused outright" is not what a MarkerSetDef does in general, and
-    // this is the case that proves it. Nothing has to balance here — there is
-    // no consumed-equals-size check in `parse_dataset` — so it is enough that
-    // the four bytes landing in the count slot read as a plausible count with
-    // that many NUL-terminated strings behind them. Spell the count into the
-    // name itself: "A", NUL, i32(1), "m", NUL.
+    // A plausible shifted count with enough terminated strings can still
+    // parse. Encode one marker name into the bytes after the NUL: "A", NUL,
+    // i32(1), "m", NUL.
     let mut name = vec![b'A', 0];
     name.extend_from_slice(&1i32.to_le_bytes());
     name.extend_from_slice(b"m\0");
@@ -480,8 +468,12 @@ fn an_interior_nul_in_a_modeldef_name_breaks_the_round_trip_both_ways() {
         name: String::from_utf8(name).expect("valid UTF-8"),
         marker_names: Vec::new(),
     });
-    assert!(ok.to_datagram().is_err());
-    let back = ModelDef::parse(&ok.to_datagram_lossy()).expect("this one does parse");
+    assert!(ok.to_datagram(Version::V4_1).is_err());
+    let back = ModelDef::parse(
+        &ok.to_datagram_lossy(Version::V4_1).expect("4.1 encodes"),
+        Version::V4_1,
+    )
+    .expect("this one does parse");
     assert_ne!(back, ok, "and it is not the model definition that went out");
     let DataSet::MarkerSet(msd) = &back.datasets[1] else {
         panic!("it comes back a marker set, just a different one");
@@ -496,7 +488,11 @@ fn an_interior_nul_in_a_modeldef_name_breaks_the_round_trip_both_ways() {
     // Reach control: the fixture without the NUL round-trips.
     let clean = sample_modeldef();
     assert_eq!(
-        ModelDef::parse(&clean.to_datagram().expect("fixture encodes")).expect("parse"),
+        ModelDef::parse(
+            &clean.to_datagram(Version::V4_1).expect("fixture encodes"),
+            Version::V4_1
+        )
+        .expect("parse"),
         clean
     );
 }
@@ -518,8 +514,12 @@ fn a_dataset_other_carrying_a_decoded_type_id_parses_back_as_that_type() {
                 body: body.clone(),
             }],
         };
-        assert!(m.to_datagram().is_err());
-        let back = ModelDef::parse(&m.to_datagram_lossy()).expect("parse");
+        assert!(m.to_datagram(Version::V4_1).is_err());
+        let back = ModelDef::parse(
+            &m.to_datagram_lossy(Version::V4_1).expect("4.1 encodes"),
+            Version::V4_1,
+        )
+        .expect("parse");
         assert_ne!(back, m, "type id {type_id} aliases a decoded dataset");
         assert!(!matches!(back.datasets[0], DataSet::Other { .. }));
     }
@@ -533,7 +533,11 @@ fn a_dataset_other_carrying_a_decoded_type_id_parses_back_as_that_type() {
             }],
         };
         assert_eq!(
-            ModelDef::parse(&m.to_datagram().expect("fixture encodes")).expect("parse"),
+            ModelDef::parse(
+                &m.to_datagram(Version::V4_1).expect("fixture encodes"),
+                Version::V4_1
+            )
+            .expect("parse"),
             m
         );
     }

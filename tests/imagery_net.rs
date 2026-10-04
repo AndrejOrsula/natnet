@@ -1,7 +1,6 @@
 //! [`ImageClient`] over loopback: a synthetic AUGI/1 stream is written by a
-//! thread and read back record-by-record, exercising both connection postures
-//! (the client dials out; the client adopts an accepted stream) with no
-//! hardware and no `motive-bridge` build.
+//! thread and read back record-by-record, exercising both connection modes:
+//! the client connects to a peer or adopts an accepted stream.
 
 #![cfg(all(feature = "imagery", feature = "net"))]
 #![allow(
@@ -148,7 +147,7 @@ fn client_dials_out_and_reads_a_whole_stream() {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind");
     let addr = match listener.local_addr().expect("addr") {
         std::net::SocketAddr::V4(a) => a,
-        other => panic!("expected v4, got {other}"),
+        other @ std::net::SocketAddr::V6(_) => panic!("expected v4, got {other}"),
     };
 
     let server = thread::spawn(move || {
@@ -185,7 +184,7 @@ fn a_wrong_interface_is_refused_rather_than_streamed() {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind");
     let addr = match listener.local_addr().expect("addr") {
         std::net::SocketAddr::V4(a) => a,
-        other => panic!("expected v4, got {other}"),
+        other @ std::net::SocketAddr::V6(_) => panic!("expected v4, got {other}"),
     };
     let accepter = thread::spawn(move || drop(listener.accept()));
 
@@ -664,14 +663,8 @@ fn byte_drip_cannot_restart_the_total_record_deadline() {
     server.join().expect("server");
 }
 
-/// Binds a loopback pair, writes `bytes` from the peer, and returns a client
-/// adopting the receiving end only once every one of those bytes is confirmed
-/// present in its receive buffer with `peek` — which consumes nothing.
-///
-/// The confirmation is what keeps the two tests below off a sleep race: when
-/// `recv_record` is called the bytes are already there, so nothing in the test
-/// depends on how fast loopback is. The returned peer stream must be held by
-/// the caller; dropping it would turn an incomplete record into a clean EOF.
+/// Returns a client after `bytes` are queued, confirmed with `peek`.
+/// Keep the peer alive so an incomplete record does not become a clean EOF.
 fn buffered_peer(bytes: &[u8]) -> (ImageClient, TcpStream) {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind");
     let addr = listener.local_addr().expect("address");
@@ -696,30 +689,11 @@ fn buffered_peer(bytes: &[u8]) -> (ImageClient, TcpStream) {
     (client, server_stream)
 }
 
-/// The record deadline bounds *waiting*, not reading. A record whose every
-/// byte is already in the receive buffer must be delivered whenever the
-/// deadline passes — before the read that collects it, during it, or after
-/// it — because none of those is the client waiting for anything. Discarding
-/// such a record would throw away a complete one and, because receive
-/// failures are terminal, end the session with the record in hand.
+/// A fully buffered record is delivered even when the deadline has passed.
 ///
-/// **Not a bounded retry: this is deterministic.** `buffered_peer` has already
-/// confirmed the twelve bytes are present, and where the deadline falls no
-/// longer selects between outcomes. Before the first read it makes that read
-/// the single post-deadline read, of bytes that are provably there; after the
-/// first read it lands once that read has already returned them. Both deliver.
-/// Every attempt must therefore succeed, and an attempt that times out is a
-/// regression, reported as one rather than retried.
-///
-/// The two deadlines are the two placements, and the first needs no window at
-/// all: a 1 ns timeout is already spent before the first read is issued, so it
-/// takes the post-deadline path on every host, every time. On `e157774` it
-/// destroyed this record 100 times in 100.
-///
-/// This is the empty-body case (`Heartbeat`, `total == PREFIX_LEN`, no body
-/// read). The bodied case is the test below it, and the two are not
-/// interchangeable: an earlier attempt passed this one while destroying every
-/// record with a payload.
+/// Deterministic, not a retry: `buffered_peer` already confirmed the bytes are
+/// queued, so the post-deadline read always finds them. The attempts only
+/// vary where the deadline lands.
 #[test]
 fn a_fully_buffered_record_is_delivered_when_its_deadline_expires_mid_read() {
     const ATTEMPTS: usize = 64;
@@ -759,15 +733,7 @@ fn a_fully_buffered_record_is_delivered_when_its_deadline_expires_mid_read() {
     );
 }
 
-/// The companion to the test above: delivering a complete record past its
-/// deadline must not weaken the deadline itself. The same construction with an
-/// *incomplete* record — five of the twelve prefix bytes buffered and a peer
-/// that sends no more — must still fail with [`std::io::ErrorKind::TimedOut`],
-/// clear the buffer, and leave the client terminal. Nothing in the
-/// assertion depends on where the deadline falls: five bytes are all there
-/// ever will be, so the single post-deadline read is short whenever it runs,
-/// and a read issued before the deadline runs out of time instead. Both
-/// produce that kind, so this needs no retry.
+/// An incomplete record still times out, clears the buffer, and ends the session.
 #[test]
 fn an_incomplete_record_past_its_deadline_still_fails_and_is_terminal() {
     let record = imagery::heartbeat_record();
@@ -788,12 +754,7 @@ fn an_incomplete_record_past_its_deadline_still_fails_and_is_terminal() {
     assert_eq!(second.to_string(), first.to_string());
 }
 
-/// One `ImageFrame` record, prefix plus a `payload_len`-byte payload.
-///
-/// Deliberately the record the crate exists for, and deliberately *bodied*:
-/// `recv_record` reads the twelve-byte prefix and the payload in two separate
-/// phases under one deadline, and a record with no payload never enters the
-/// second at all.
+/// Builds an encoded image record with a payload of `payload_len` bytes.
 fn bodied_frame_record(payload_len: usize) -> Vec<u8> {
     let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
     let record = ImageFrame {
@@ -816,27 +777,10 @@ fn bodied_frame_record(payload_len: usize) -> Vec<u8> {
     record
 }
 
-/// The companion this slice exists for: the same guarantee for a record with a
-/// **payload**.
+/// A fully buffered image record is delivered after its deadline passes.
 ///
-/// `recv_record` reads in two phases under one deadline — prefix, then
-/// payload — so a deadline that passes while the prefix is being collected
-/// arrives at the payload read with nothing left to spend. Before
-/// this repair that read failed immediately, discarding a record every byte of
-/// which was already in the kernel receive queue and shutting the connection
-/// down; the empty-body test above could not see it, because `Heartbeat` and
-/// `Bye` never reach the second call. Measured on the previous candidate
-/// `e157774`, payloads of 1, 64, 4096 and 65536 bytes were delivered 0 times in
-/// 200 attempts each at a 1 µs deadline, while the heartbeat was delivered
-/// 200/200 in the same process.
-///
-/// Deterministic for the same reason as the test above: every byte is
-/// `peek`-confirmed present before the client is built, and no read of bytes
-/// that are present can fail, on either side of the deadline. The 1 ns row
-/// needs no timing window at all — that deadline is spent before the first
-/// read is issued — and the 1 µs row is the case where it is spent between the
-/// prefix read and the payload read instead. On `e157774` both
-/// rows are 0 delivered.
+/// Separate from the heartbeat case: a bodyless record cannot catch a
+/// regression that loses the payload.
 #[test]
 fn a_fully_buffered_bodied_record_is_delivered_past_its_deadline() {
     const ATTEMPTS: usize = 32;
@@ -871,16 +815,7 @@ fn a_fully_buffered_bodied_record_is_delivered_past_its_deadline() {
     }
 }
 
-/// Delivering a bodied record past its deadline must not weaken the deadline
-/// at the payload read — the boundary the repair moved.
-///
-/// The prefix is complete and arrives, so `recv_record` gets past `record_len`,
-/// past the [`MAX_RECORD_LEN`] check and into the payload read; but only half
-/// the payload is buffered and the peer sends no more. That must still be a
-/// timeout: [`std::io::ErrorKind::TimedOut`], an empty buffer, and a terminal
-/// client. This is the case that separates "finish from bytes that arrived"
-/// from "ignore the deadline"; break the repair so that the payload read waits
-/// or succeeds regardless, and this test fails while the two above still pass.
+/// A record missing payload bytes still times out and ends the session.
 #[test]
 fn a_record_missing_payload_bytes_past_its_deadline_still_fails_and_is_terminal() {
     let record = bodied_frame_record(4096);
@@ -903,17 +838,7 @@ fn a_record_missing_payload_bytes_past_its_deadline_still_fails_and_is_terminal(
     assert_eq!(second.to_string(), first.to_string());
 }
 
-/// A record finished past its deadline must leave the client able to *wait*
-/// for the next one.
-///
-/// Every read is non-blocking, so the only thing that makes a later call wait
-/// is the poll loop against that call's own deadline. An implementation that
-/// treated "nothing queued" as a timeout, or that carried the first call's
-/// expired deadline into the next, would turn a working connection into a
-/// spurious timeout. Nothing about a single delivered record can show that, so
-/// this reads two records over one client: the first past a 1 µs deadline, the
-/// second with a generous deadline and its bytes written only *after* the
-/// first call returned, so it can only be collected by a call that waits.
+/// Receiving a late complete record leaves the client able to wait for another.
 #[test]
 fn a_record_finished_without_waiting_leaves_the_socket_blocking() {
     let first_record = bodied_frame_record(4096);
@@ -947,12 +872,7 @@ fn a_record_finished_without_waiting_leaves_the_socket_blocking() {
     let _peer = writer.join().expect("writer");
 }
 
-/// A twelve-byte prefix declaring `payload_len` payload bytes and nothing else.
-///
-/// Kind 99 with an empty header, as in
-/// [`exact_record_cap_is_accepted_and_one_byte_over_is_refused`]: the two tests
-/// below never deliver a record, so the kind is never parsed, and a declared
-/// length of tens of megabytes must not cost tens of megabytes to *build*.
+/// Builds a record prefix that declares a payload without supplying it.
 fn declared_prefix(payload_len: u32) -> Vec<u8> {
     let mut prefix = imagery::MAGIC.to_le_bytes().to_vec();
     prefix.extend_from_slice(&99u16.to_le_bytes());
@@ -962,42 +882,7 @@ fn declared_prefix(payload_len: u32) -> Vec<u8> {
     prefix
 }
 
-/// **What a record typically costs past its deadline must not scale with the
-/// length the peer declared.** The companion to the axis above, on the other
-/// mechanism. *Typically* is load-bearing: every cell here is a median of
-/// nine, and the paragraph on what this does not pin says what follows from
-/// that.
-///
-/// Twelve bytes are all it takes: a well-formed prefix declaring a payload,
-/// with nothing behind it and a deadline already spent. The call must fail,
-/// and the *costliest* declaration must fail within a fixed budget of the
-/// cheapest one — otherwise a peer buys work from the caller by naming a
-/// number, and buys it *after* being told the call was over. On `2c3041f`,
-/// which zero-filled the declared length, that cost rose linearly with the
-/// declaration.
-///
-/// The receive path now never allocates the declared length: the buffer grows
-/// with bytes received, and past the deadline by at most the 1 MiB room given
-/// to the single final read. Every row above 1 MiB therefore does the same
-/// bounded work. The ladder and both destination-buffer disciplines — a fresh
-/// buffer and one reused across calls — are kept so that a regression to any
-/// length-proportional allocation, at any point of the range, fails here.
-///
-/// **What this does not pin, said plainly.** A cell is a **median of nine**
-/// calls, so the budget this asserts is *"no cell's median of nine exceeds 50×
-/// the 64 KiB cell plus 10 ms"* — a bound on the typical cost, not on the worst
-/// call, and not a time ceiling: no worst-case figure is published for this
-/// call. The allocation bound itself is pinned deterministically by
-/// `a_bare_prefix_does_not_grow_the_buffer_to_its_declared_length`. If this
-/// test fails on a heavily loaded host, the budget is not the thing to change
-/// — widening it until it passes buys nothing except a test that
-/// discriminates less.
-///
-/// **Not a race and not a window.** Every row times out on every tree, so
-/// there is no outcome to flake; the assertion is on the *ratio* between rows
-/// of the same shape measured in the same process, with an absolute floor
-/// under it so an idle-host microsecond cannot be divided into a false
-/// failure. Medians of nine, because one descheduled call must not decide it.
+/// Ensures post-deadline work stays bounded as the declared payload grows.
 #[test]
 fn the_worst_declared_length_past_the_deadline_stays_within_a_fixed_budget() {
     const REPS: usize = 9;
@@ -1063,30 +948,7 @@ fn the_worst_declared_length_past_the_deadline_stays_within_a_fixed_budget() {
     );
 }
 
-/// **A record the receive queue cannot hold at once is not completed past its
-/// deadline.** The narrowing the one-read bound costs, pinned rather than only
-/// written down.
-///
-/// Bounding the post-deadline drain to a single read (of at most the larger of
-/// 1 MiB and the space already allocated) means a record whose bytes the peer
-/// has handed to the kernel, but which TCP flow control has parked in the
-/// *sender's* buffer, is no longer finished late. The module docs say so; this
-/// makes it fail if it ever stops being true, and makes the change visible
-/// against `2c3041f`, which delivers every one of these.
-///
-/// **Writer completion is synchronized.** The peer writes the whole record
-/// with one blocking `write_all`, and a channel confirms that call *returns*
-/// before `recv_record` is entered. There is no application writer left to
-/// refill the queue while the assertion runs. What makes the record
-/// uncompletable is only that this end's receive queue does not hold it all at
-/// once — which the test **measures**, with a `peek` buffer at least as large
-/// as the whole record, rather than assuming from a socket-buffer constant,
-/// and asserts before it asserts anything else. On a cold loopback connection
-/// here that queue settles at 98 304 bytes on every rep, so 256 KiB is already
-/// past it. Measured: on
-/// `2c3041f`, which drains until a non-blocking read finds nothing, all
-/// **60 of 60** of these are delivered (20 reps × 3 sizes, both profiles);
-/// with the drain bound to one read, **0 of 60**.
+/// A single post-deadline read cannot complete a record larger than the receive queue.
 #[test]
 fn a_record_too_long_for_the_receive_queue_is_not_completed_past_its_deadline() {
     const REPS: usize = 5;

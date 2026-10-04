@@ -51,28 +51,21 @@
 //! use natnet::{Decoder, Message, PlannedBody, SyntheticServer, Version};
 //!
 //! let server = SyntheticServer::new(Version::V4_1, 1_000_000);
-//! let body = PlannedBody::tracked(
-//!     7,
-//!     [1.0, 2.0, 3.0],
-//!     [0.0, 0.0, 0.0, 1.0],
-//! );
+//! let body = PlannedBody::tracked(7, [1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]);
 //! let wire = server.datagram(42, 0.5, &[body])?;
 //! let decoded = Decoder::new(Version::V4_1)?.parse(&wire)?;
 //!
-//! match decoded.message() {
-//!     Message::FrameOfData(frame) => {
-//!         assert_eq!(frame.frame_number, 42);
-//!         assert_eq!(frame.rigid_bodies.len(), 1);
-//!         assert_eq!(frame.rigid_bodies[0].id, 7);
-//!         assert!(frame.rigid_bodies[0].tracking_valid());
-//!     }
-//!     other => panic!("expected FrameOfData, got {other:?}"),
-//! }
+//! let Message::FrameOfData(frame) = decoded.message() else {
+//!     panic!("expected a frame");
+//! };
+//! assert_eq!(frame.frame_number, 42);
+//! assert_eq!(frame.rigid_bodies[0].id, 7);
 //! assert_eq!(decoded.to_datagram()?, wire);
 //! # Ok(())
 //! # }
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -140,29 +133,6 @@ pub enum Message {
     },
 }
 
-/// Parses one datagram into a [`Message`] using compatibility validation.
-///
-/// The version selects both frame and MODELDEF layout. Use [`Decoder`] for
-/// strict validation and automatic retention of the source layout.
-///
-/// # Errors
-///
-/// Propagates the per-type parse errors ([`Error::UnexpectedEof`] etc.).
-pub fn parse_message(datagram: &[u8], version: Version) -> Result<Message> {
-    let (header, payload) = message::split(datagram)?;
-    match header.message_id {
-        NAT_SERVERINFO => Ok(Message::ServerInfo(ServerInfo::parse_payload(payload)?)),
-        NAT_MODELDEF => Ok(Message::ModelDef(ModelDef::parse_payload_with_policy(
-            payload,
-            version,
-            ParsePolicy::Compatible,
-        )?)),
-        NAT_FRAMEOFDATA => Ok(Message::FrameOfData(Box::new(FrameOfData::parse_payload(
-            payload, version,
-        )?))),
-        id => Ok(Message::Other {
-            id,
-            payload: payload.to_vec(),
-        }),
-    }
-}
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

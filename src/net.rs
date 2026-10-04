@@ -1,10 +1,9 @@
-//! Optional standard-library UDP transport (`net` feature).
+//! std UDP clients (`net` feature).
 //!
-//! [`DataClient`] is receive-only. [`CommandClient`] is the bounded, typed
-//! command path: it accepts only validated [`crate::command::Request`] values,
-//! owns its socket transaction mutably, checks the configured peer, and uses
-//! an absolute deadline. [`RawCommandClient`] is the explicit escape hatch for
-//! callers that need unrestricted datagrams or socket controls.
+//! - [`DataClient`]: receive-only data channel, unicast or multicast.
+//! - [`CommandClient`]: sends validated requests, filters the configured peer
+//!   and bounds every exchange by a deadline.
+//! - [`RawCommandClient`]: unrestricted datagrams and socket controls.
 //!
 //! Peer filtering is a transport boundary, not authentication. Before each
 //! request is sent, the command client discards every datagram already queued
@@ -32,53 +31,36 @@ use crate::version::Version;
 /// Largest datagram accepted by the safe command receive path.
 pub const MAX_COMMAND_DATAGRAM: usize = 65_535;
 
-/// Largest IPv4 UDP payload. NatNet's `u16` header field is wider than this
-/// transport limit, so a request can fit its NatNet header and still be
-/// refused before socket I/O.
+/// Largest IPv4 UDP payload. NatNet's `u16` header field is wider than this transport limit,
+/// so a request can fit its NatNet header and still be refused before socket I/O.
 pub const MAX_IPV4_UDP_PAYLOAD: usize = 65_507;
 
 /// Smallest [`DataClient::recv`] buffer that can hold every IPv4 UDP datagram
-/// ([`MAX_IPV4_UDP_PAYLOAD`], 65 507 bytes).
-///
-/// A datagram longer than the receive buffer is truncated by the operating
-/// system without a portable indication. With a buffer of at least this size
-/// truncation cannot happen; with a shorter buffer, a datagram that fills it
+/// ([`MAX_IPV4_UDP_PAYLOAD`], 65 507 bytes). A datagram longer than the receive buffer is
+/// truncated by the operating system without a portable indication. With a buffer of at least
+/// this size truncation cannot happen; with a shorter buffer, a datagram that fills it
 /// exactly may have been truncated and is reported as an error.
 pub const MIN_DATA_BUFFER: usize = MAX_IPV4_UDP_PAYLOAD;
 
-/// NAT_UNRECOGNIZED_REQUEST, re-exported here for existing callers.
-/// [`CommandClient`] ends a transaction on this reply from the configured peer
-/// with [`io::ErrorKind::Unsupported`].
+/// Response for an unsupported NatNet command request. [`CommandClient`] returns
+/// [`io::ErrorKind::Unsupported`] when it receives this reply.
 pub use crate::message::NAT_UNRECOGNIZED_REQUEST;
 
 /// A receive-only NatNet data-channel UDP client.
-///
 /// # Socket options
-///
-/// [`DataClient::bind_multicast`] and [`DataClient::bind_unicast`] use
-/// `std::net::UdpSocket::bind`, which can set neither `SO_REUSEADDR` nor
-/// `SO_RCVBUF`, and this crate takes no socket dependency. Two consumers on
-/// one host binding the same data port therefore get `AddrInUse`, and the
-/// receive buffer is the operating-system default. The NatNet SDK 4.1
-/// `PacketClient` sample sets `SO_REUSEADDR` on its data socket and requests
-/// `SO_RCVBUF` of `0x10000` bytes (its comment says 1 MB); the SDK Python
-/// client sets `SO_REUSEADDR`. A caller that needs either option creates and
-/// configures the socket itself (for example with `socket2`), binds it,
-/// joins any multicast group, and adopts it with [`DataClient::from_socket`].
+/// The bind constructors use `std::net::UdpSocket` and do not configure `SO_REUSEADDR` or
+/// `SO_RCVBUF`. Configure a socket yourself, join its multicast group if needed, then adopt
+/// it with [`DataClient::from_socket`].
 #[derive(Debug)]
 pub struct DataClient {
     socket: UdpSocket,
 }
 
 impl DataClient {
-    /// Joins `group` on the explicitly selected local interface.
-    ///
-    /// The socket binds to `0.0.0.0:port` so multicast datagrams are
-    /// deliverable. Joining can cause the operating system's IGMP membership
-    /// report; this type has no NatNet datagram-send operation.
-    ///
+    /// Joins `group` on the explicitly selected local interface. The socket binds to
+    /// `0.0.0.0:port` so multicast datagrams are deliverable. Joining can cause the operating
+    /// system's IGMP membership report; this type has no NatNet datagram-send operation.
     /// # Errors
-    ///
     /// Returns the operating-system error from binding or joining the group.
     pub fn bind_multicast(interface: Ipv4Addr, group: Ipv4Addr, port: u16) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))?;
@@ -87,69 +69,54 @@ impl DataClient {
     }
 
     /// Binds a unicast data socket to an explicitly selected local interface.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from binding the socket.
     pub fn bind_unicast(interface: Ipv4Addr, port: u16) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddrV4::new(interface, port))?;
         Ok(Self { socket })
     }
 
-    /// Adopts a socket the caller has already created, configured, bound and,
-    /// for multicast, joined to its group.
-    ///
-    /// This is the seam for socket options `std` cannot set, such as
-    /// `SO_REUSEADDR` and `SO_RCVBUF` (see [the type docs](DataClient)).
-    /// Nothing is transmitted, and the socket's options and blocking mode are
-    /// left as the caller set them. The receive-only guarantee covers this
-    /// type's API: a clone of the socket the caller kept is outside it.
+    /// Adopts a socket the caller has already created, configured, bound and, for multicast,
+    /// joined to its group. This is the seam for socket options `std` cannot set, such as
+    /// `SO_REUSEADDR` and `SO_RCVBUF` (see [the type docs](DataClient)). Nothing is transmitted,
+    /// and the socket's options and blocking mode are left as the caller set them. The
+    /// receive-only guarantee covers this type's API: a clone of the socket the caller kept is
+    /// outside it.
     #[must_use]
     pub fn from_socket(socket: UdpSocket) -> Self {
         Self { socket }
     }
 
     /// Puts the receive socket into (non-)blocking mode.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from changing the socket mode.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.socket.set_nonblocking(nonblocking)
     }
 
     /// Sets the data receive timeout. `None` restores an indefinite wait.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from changing the timeout.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.socket.set_read_timeout(timeout)
     }
 
     /// Returns the local address selected for the data socket.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from querying the socket.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
-    /// Receives one datagram and preserves its source address.
-    ///
-    /// Pass a buffer of at least [`MIN_DATA_BUFFER`] bytes. A shorter buffer
-    /// still works for datagrams shorter than it, but a datagram that fills it
-    /// exactly may have been truncated by the operating system, so that case
-    /// is returned as an error rather than as possibly partial bytes.
-    ///
+    /// Receives one datagram and preserves its source address. Pass a buffer of at least
+    /// [`MIN_DATA_BUFFER`] bytes. A shorter buffer still works for datagrams shorter than it, but
+    /// a datagram that fills it exactly may have been truncated by the operating system, so that
+    /// case is returned as an error rather than as possibly partial bytes.
     /// # Errors
-    ///
-    /// Returns [`io::ErrorKind::InvalidData`] when the received datagram fills
-    /// a buffer shorter than [`MIN_DATA_BUFFER`] (the datagram is consumed and
-    /// cannot be recovered; retry with a larger buffer for the next one).
-    /// Otherwise returns the operating-system receive error, including
-    /// `WouldBlock` or `TimedOut` when configured by the caller.
+    /// Returns [`io::ErrorKind::InvalidData`] when the received datagram fills a buffer shorter
+    /// than [`MIN_DATA_BUFFER`] (the datagram is consumed and cannot be recovered; retry with a
+    /// larger buffer for the next one). Otherwise returns the operating-system receive error,
+    /// including `WouldBlock` or `TimedOut` when configured by the caller.
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         let (received, source) = self.socket.recv_from(buf)?;
         if received == buf.len() && buf.len() < MIN_DATA_BUFFER {
@@ -162,13 +129,11 @@ impl DataClient {
     }
 }
 
-/// An unrestricted command-channel UDP client.
-///
-/// Raw operations intentionally live on this distinct type. The safe client
-/// can be converted into it only by consuming the idle client with
-/// [`CommandClient::into_raw`]. A raw client can transmit arbitrary bytes,
-/// receive from any peer, and change socket options; those operations carry no
-/// command validation or transaction guarantee.
+/// An unrestricted command-channel UDP client. Raw operations intentionally live on this
+/// distinct type. The safe client can be converted into it only by consuming the idle client
+/// with [`CommandClient::into_raw`]. A raw client can transmit arbitrary bytes, receive from
+/// any peer, and change socket options; those operations carry no command validation or
+/// transaction guarantee.
 #[derive(Debug)]
 pub struct RawCommandClient {
     socket: UdpSocket,
@@ -176,11 +141,9 @@ pub struct RawCommandClient {
 }
 
 impl RawCommandClient {
-    /// Binds an unrestricted command socket to `interface` and records the
-    /// default destination `server`.
-    ///
+    /// Binds an unrestricted command socket to `interface` and records the default destination
+    /// `server`.
     /// # Errors
-    ///
     /// Returns the operating-system error from binding the socket.
     pub fn bind(interface: Ipv4Addr, server: SocketAddrV4) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddrV4::new(interface, 0))?;
@@ -197,174 +160,110 @@ impl RawCommandClient {
     }
 
     /// The local address selected for this socket.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from querying the socket.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
     /// Sends arbitrary bytes to the configured default destination.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system send error.
     pub fn send(&self, datagram: &[u8]) -> io::Result<usize> {
         self.socket.send_to(datagram, self.server)
     }
 
     /// Sends arbitrary bytes to any destination.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system send error.
     pub fn send_to(&self, datagram: &[u8], destination: SocketAddr) -> io::Result<usize> {
         self.socket.send_to(datagram, destination)
     }
 
     /// Receives arbitrary bytes and returns their source address.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system receive error.
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.socket.recv_from(buf)
     }
 
     /// Changes raw receive blocking behavior.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from changing the socket mode.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.socket.set_nonblocking(nonblocking)
     }
 
     /// Changes the raw receive timeout.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from changing the timeout.
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.socket.set_read_timeout(timeout)
     }
 
     /// Changes the raw send timeout.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from changing the timeout.
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.socket.set_write_timeout(timeout)
     }
 
     /// Reads the current raw receive timeout.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from querying the timeout.
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
         self.socket.read_timeout()
     }
 
     /// Reads the current raw send timeout.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from querying the timeout.
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         self.socket.write_timeout()
     }
 }
 
-/// A bounded command-channel UDP client.
-///
-/// The configured `server` is checked by the transport before a datagram is
-/// accepted as a reply. Each transaction also filters message IDs and uses an
-/// absolute deadline, so unrelated same-peer traffic cannot extend a wait.
-///
-/// The safe client owns receive and timeout operations for the duration of a
-/// transaction. Those escape hatches are intentionally absent:
-///
+/// A bounded command-channel UDP client. The configured `server` is checked by the transport
+/// before a datagram is accepted as a reply. Each transaction also filters message IDs and
+/// uses an absolute deadline, so unrelated same-peer traffic cannot extend a wait. Receive
+/// controls belong to the transaction; socket access and raw conversion are unavailable while
+/// keeping the safe client:
 /// ```compile_fail
 /// use natnet::net::CommandClient;
-/// use std::net::{Ipv4Addr, SocketAddrV4};
-///
-/// let client = match CommandClient::bind(
-///     Ipv4Addr::LOCALHOST,
-///     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1510),
-/// ) {
-///     Ok(client) => client,
-///     Err(_) => return,
-/// };
-/// let mut bytes = [0u8; 64];
-/// client.recv(&mut bytes);
+/// fn invalid(client: &CommandClient) {
+///     let mut bytes = [0; 64];
+///     client.recv(&mut bytes);
+/// }
 /// ```
-///
 /// ```compile_fail
 /// use natnet::net::CommandClient;
-/// use std::net::{Ipv4Addr, SocketAddrV4};
-///
-/// let client = match CommandClient::bind(
-///     Ipv4Addr::LOCALHOST,
-///     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1510),
-/// ) {
-///     Ok(client) => client,
-///     Err(_) => return,
-/// };
-/// client.set_read_timeout(None);
+/// fn invalid(client: &CommandClient) {
+///     client.set_read_timeout(None);
+/// }
 /// ```
-///
 /// ```compile_fail
 /// use natnet::net::CommandClient;
-/// use std::net::{Ipv4Addr, SocketAddrV4};
-///
-/// let client = match CommandClient::bind(
-///     Ipv4Addr::LOCALHOST,
-///     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1510),
-/// ) {
-///     Ok(client) => client,
-///     Err(_) => return,
-/// };
-/// let _socket = client.socket;
+/// fn invalid(client: &CommandClient) {
+///     let _socket = client.socket;
+/// }
 /// ```
-///
-/// A live mutable borrow prevents a second operation from using the same
-/// client while that transaction is still held:
-///
+/// A live mutable borrow prevents another client operation:
 /// ```compile_fail
 /// use natnet::net::CommandClient;
 /// use std::net::{Ipv4Addr, SocketAddrV4};
-///
-/// let mut client = match CommandClient::bind(
-///     Ipv4Addr::LOCALHOST,
-///     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1510),
-/// ) {
-///     Ok(client) => client,
-///     Err(_) => return,
-/// };
-/// let active = &mut client;
-/// let _second = client.local_addr();
-/// let _ = active.local_addr();
+/// fn invalid(client: &mut CommandClient) {
+///     let active = &mut *client;
+///     let _second = client.local_addr();
+///     let _ = active.local_addr();
+/// }
 /// ```
-///
-/// Converting to the raw API consumes the safe client, so it cannot be reused
-/// after that boundary:
-///
+/// Conversion to the raw API consumes the safe client:
 /// ```compile_fail
 /// use natnet::net::CommandClient;
-/// use std::net::{Ipv4Addr, SocketAddrV4};
-///
-/// let client = match CommandClient::bind(
-///     Ipv4Addr::LOCALHOST,
-///     SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1510),
-/// ) {
-///     Ok(client) => client,
-///     Err(_) => return,
-/// };
-/// let _raw = client.into_raw();
-/// let _ = client.local_addr();
+/// fn invalid(client: CommandClient) {
+///     let _raw = client.into_raw();
+///     let _ = client.local_addr();
+/// }
 /// ```
 #[derive(Debug)]
 pub struct CommandClient {
@@ -373,13 +272,10 @@ pub struct CommandClient {
 }
 
 impl CommandClient {
-    /// Binds an explicit local interface and records the configured server IP
-    /// and port for transport-owned peer filtering.
-    ///
+    /// Binds an explicit local interface and records the configured server IP and port for
+    /// transport-owned peer filtering.
     /// # Errors
-    ///
-    /// Returns the operating-system error from binding or connecting the
-    /// socket.
+    /// Returns the operating-system error from binding the socket.
     pub fn bind(interface: Ipv4Addr, server: SocketAddrV4) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddrV4::new(interface, 0))?;
         let server = SocketAddr::V4(server);
@@ -393,16 +289,13 @@ impl CommandClient {
     }
 
     /// The local address selected for this client.
-    ///
     /// # Errors
-    ///
     /// Returns the operating-system error from querying the socket.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
-    /// Consumes the idle safe client and transfers its socket to the
-    /// unrestricted raw API.
+    /// Consumes the idle safe client and transfers its socket to the unrestricted raw API.
     #[must_use]
     pub fn into_raw(self) -> RawCommandClient {
         RawCommandClient {
@@ -411,29 +304,21 @@ impl CommandClient {
         }
     }
 
-    /// Sends one validated command request and receives its matching reply.
-    ///
-    /// The receive buffer is owned by this operation and can hold every valid
-    /// UDP datagram. The caller cannot silently accept a truncated response by
-    /// supplying a short buffer. A zero duration, deadline overflow, an IPv4
-    /// request larger than the UDP payload limit, or a transport failure is
-    /// returned before a successful exchange is reported.
-    ///
-    /// Datagrams already queued when the call starts are discarded before the
-    /// request is sent, so a reply to an earlier, timed-out request cannot be
-    /// returned here. A same-peer datagram arriving after the send is still
+    /// Sends one validated command request and receives its matching reply. The receive buffer is
+    /// owned by this operation and can hold every valid UDP datagram. The caller cannot silently
+    /// accept a truncated response by supplying a short buffer. A zero duration, deadline
+    /// overflow, an IPv4 request larger than the UDP payload limit, or a transport failure is
+    /// returned before a successful exchange is reported. Datagrams already queued when the call
+    /// starts are discarded before the request is sent, so a reply to an earlier, timed-out
+    /// request cannot be returned here. A same-peer datagram arriving after the send is still
     /// accepted if its message id matches (see the module docs).
-    ///
     /// # Errors
-    ///
-    /// Returns `InvalidInput` for an invalid timeout or oversized request;
-    /// also returns `InvalidInput` when a Tier-1 SetProperty is supplied
-    /// outside [`CommandClient::execute_tier1`];
-    /// `TimedOut` when the absolute deadline expires, on every platform
-    /// (including while discarding stale datagrams before the send);
-    /// `Unsupported` as soon as the configured peer replies
-    /// [`NAT_UNRECOGNIZED_REQUEST`]; `InvalidData` for a malformed matching
-    /// reply; and the underlying socket error for send, receive, or
+    /// Returns `InvalidInput` for an invalid timeout or oversized request; also returns
+    /// `InvalidInput` when a Tier-1 SetProperty is supplied outside
+    /// [`CommandClient::execute_tier1`]; `TimedOut` when the absolute deadline expires, on every
+    /// platform (including while discarding stale datagrams before the send); `Unsupported` as
+    /// soon as the configured peer replies [`NAT_UNRECOGNIZED_REQUEST`]; `InvalidData` for a
+    /// malformed matching reply; and the underlying socket error for send, receive, or
     /// option-restore failures.
     pub fn exchange(&mut self, request: &Request, timeout: Duration) -> io::Result<Vec<u8>> {
         if request.kind() == RequestKind::SetProperty && request.tier() == Some(WriteTier::Tier1) {
@@ -444,46 +329,21 @@ impl CommandClient {
         self.exchange_inner(request, timeout)
     }
 
-    /// Alias for [`CommandClient::exchange`] using the typed request boundary.
-    ///
+    /// Performs a bounded NAT_CONNECT exchange and validates the negotiated protocol layout, the
+    /// server's own version. An unsupported layout is returned with the decoded SERVERINFO
+    /// attached for diagnostics.
     /// # Errors
-    ///
-    /// Propagates the errors documented for [`CommandClient::exchange`].
-    pub fn transact(&mut self, request: &Request, timeout: Duration) -> io::Result<Vec<u8>> {
-        self.exchange(request, timeout)
-    }
-
-    /// A typed-send spelling retained for callers migrating from the old
-    /// arbitrary-byte `send` method. It accepts no raw byte slice.
-    ///
-    /// # Errors
-    ///
-    /// Propagates the errors documented for [`CommandClient::exchange`].
-    pub fn send(&mut self, request: &Request, timeout: Duration) -> io::Result<Vec<u8>> {
-        self.exchange(request, timeout)
-    }
-
-    /// Performs a bounded NAT_CONNECT exchange and validates the negotiated
-    /// protocol layout. Unsupported SERVERINFO is returned with the decoded
-    /// value attached for diagnostics.
-    ///
-    /// # Errors
-    ///
-    /// Returns a transport, decode, request-construction, or unsupported
-    /// protocol error. Unsupported replies retain their decoded SERVERINFO.
+    /// Returns a transport, decode, request-construction, or unsupported protocol error.
+    /// Unsupported replies retain their decoded SERVERINFO.
     pub fn connect_handshake(&mut self, timeout: Duration) -> Result<ServerInfo, HandshakeError> {
         let request = command::connect_request().map_err(HandshakeError::Command)?;
         self.handshake(&request, timeout, |info| info.protocol_version)
     }
 
-    /// Performs a bounded NAT_CONNECT exchange carrying `options` and
-    /// validates the layout the server will stream,
-    /// [`ConnectOptions::stream_version`], rather than the server's own
-    /// version. Request a version only with unicast data; see
-    /// [`ConnectOptions`].
-    ///
+    /// Performs a bounded NAT_CONNECT exchange carrying `options` and validates the layout the
+    /// server will stream, [`ConnectOptions::stream_version`], rather than the server's own
+    /// version. Request a version only with unicast data; see [`ConnectOptions`].
     /// # Errors
-    ///
     /// As [`CommandClient::connect_handshake`].
     pub fn connect_handshake_with(
         &mut self,
@@ -582,13 +442,11 @@ impl CommandClient {
         }
     }
 
-    /// Discards every datagram already queued on the socket before a request
-    /// is sent, so a reply that arrived after an earlier transaction's
-    /// deadline cannot be accepted as the answer to this one.
-    ///
-    /// The drain is bounded by the transaction deadline, so a peer flooding
-    /// the socket cannot hold it open. Blocking mode is restored on every
-    /// exit; the drain error takes precedence over a restore error.
+    /// Discards every datagram already queued on the socket before a request is sent, so a reply
+    /// that arrived after an earlier transaction's deadline cannot be accepted as the answer to
+    /// this one. The drain is bounded by the transaction deadline, so a peer flooding the socket
+    /// cannot hold it open. Blocking mode is restored on every exit; the drain error takes
+    /// precedence over a restore error.
     fn drain_queued(&self, buffer: &mut [u8], deadline: Instant) -> io::Result<()> {
         self.socket.set_nonblocking(true)?;
         let drained = loop {
@@ -644,8 +502,8 @@ fn invalid_data(message: impl fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
-/// A bounded handshake failure. Unsupported replies retain their decoded
-/// SERVERINFO so callers can log the producer's reported version.
+/// A bounded handshake failure. Unsupported replies retain their decoded SERVERINFO so
+/// callers can log the producer's reported version.
 #[derive(Debug)]
 pub enum HandshakeError {
     /// Socket or deadline failure.
@@ -654,7 +512,10 @@ pub enum HandshakeError {
     Command(command::CommandError),
     /// The peer's datagram was not a valid SERVERINFO.
     Decode(NatNetError),
-    /// SERVERINFO decoded, but its protocol layout is not supported.
+    /// SERVERINFO decoded, but the layout the server will stream is not supported: the server's
+    /// own version after [`CommandClient::connect_handshake`], or
+    /// [`ConnectOptions::stream_version`] after [`CommandClient::connect_handshake_with`], which
+    /// is the requested version when the server honours requests.
     UnsupportedVersion {
         /// Decoded SERVERINFO retained for diagnostics.
         info: ServerInfo,
@@ -714,9 +575,9 @@ pub enum Tier1Phase {
 /// A transport or command failure recorded by the Tier-1 executor.
 #[derive(Debug)]
 pub enum Tier1Failure {
-    /// The socket exchange failed or timed out. This also covers a preflight
-    /// failure before the write reached the socket, so the error does not by
-    /// itself prove that a remote write was attempted.
+    /// The socket exchange failed or timed out. This also covers a preflight failure before the
+    /// write reached the socket, so the error does not by itself prove that a remote write was
+    /// attempted.
     Io(io::Error),
     /// The received datagram failed command decoding or verification.
     Command(command::CommandError),
@@ -752,12 +613,11 @@ pub enum Tier1ExecutionError {
         /// Earlier targets whose write and re-read were verified.
         progress: Vec<command::ProgressRecord>,
     },
-    /// The write or its transport preflight failed, so the remote outcome
-    /// could not be established. The executor has stopped and never retries
-    /// automatically.
+    /// The write or its transport preflight failed, so the remote outcome could not be
+    /// established. The executor has stopped and never retries automatically.
     UnknownRemoteOutcome {
-        /// The target associated with the failed operation. Its write may not
-        /// have reached the producer.
+        /// The target associated with the failed operation. Its write may not have reached the
+        /// producer.
         target: String,
         /// The operation stage that failed.
         phase: Tier1Phase,
@@ -811,23 +671,19 @@ impl std::error::Error for Tier1ExecutionError {
     }
 }
 
-/// Executes a validated Tier-1 batch one target at a time.
-///
-/// A write status and request-context re-read must both succeed before the
-/// next target is sent. Every failure after a write attempt stops progression;
-/// a preflight failure also stops before any send. The returned error records
-/// the target, prior progress and any unknown remote outcome. No retry or
+/// Executes a validated Tier-1 batch one target at a time. A write status and request-context
+/// re-read must both succeed before the next target is sent. Every failure after a write
+/// attempt stops progression; a preflight failure also stops before any send. The returned
+/// error records the target, prior progress and any unknown remote outcome. No retry or
 /// rollback is attempted.
 impl CommandClient {
-    /// Executes a validated Tier-1 write sequence with one write/status and
-    /// request-context re-read per target.
-    ///
+    /// Executes a validated Tier-1 write sequence with one write/status and request-context
+    /// re-read per target.
     /// # Errors
-    ///
-    /// Returns a structured status or unknown-remote-outcome failure. Once a
-    /// write is attempted, the sequence stops on any later transport or
-    /// verification failure and never retries automatically. Every failure
-    /// carries the progress records completed before the failed target.
+    /// Returns a structured status or unknown-remote-outcome failure. Once a write is attempted,
+    /// the sequence stops on any later transport or verification failure and never retries
+    /// automatically. Every failure carries the progress records completed before the failed
+    /// target.
     pub fn execute_tier1(
         &mut self,
         write: command::Tier1Write,

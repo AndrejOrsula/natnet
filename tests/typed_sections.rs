@@ -1,11 +1,8 @@
-//! Typed skeleton, asset, force-plate and device frame sections and typed
-//! MODELDEF dataset types 2–6.
+//! Typed frame sections and MODELDEF dataset types 2–6.
 //!
-//! Every wire fixture here is assembled field by field from the NatNet SDK
-//! 4.1.0.0 `PacketClient.cpp` unpackers, independently of the crate's
-//! encoders, so a shared encoder/decoder mistake cannot make both sides agree.
-//! The layouts are spec-derived: no real Motive capture with these sections
-//! is available.
+//! Independent byte fixtures exercise decoding, encoding, and round trips.
+//! Layouts for types 2–6 are spec-derived and unconfirmed against a real Motive
+//! server.
 
 #![allow(
     clippy::expect_used,
@@ -71,10 +68,6 @@ fn sized(version: Version) -> bool {
     version.major == 4 && version.minor == 1
 }
 
-// ---------------------------------------------------------------------------
-// FrameOfData fixtures
-// ---------------------------------------------------------------------------
-
 fn frame_body(id: i32, x: f32) -> RigidBody {
     RigidBody {
         id,
@@ -95,7 +88,7 @@ fn frame_marker(id: i32, x: f32) -> LabeledMarker {
     }
 }
 
-/// The literal 38-byte rigid body of `UnpackRigidBodyData`.
+/// A literal 38-byte rigid-body entry.
 fn put_frame_body(out: &mut Vec<u8>, body: &RigidBody) {
     put_i32(out, body.id);
     put_f32s(out, &body.position);
@@ -104,7 +97,7 @@ fn put_frame_body(out: &mut Vec<u8>, body: &RigidBody) {
     put_u16(out, body.params);
 }
 
-/// The literal 26-byte marker of `UnpackAssetMarkerData`.
+/// A literal 26-byte asset-marker entry.
 fn put_frame_marker(out: &mut Vec<u8>, marker: &LabeledMarker) {
     put_i32(out, marker.id);
     put_f32s(out, &marker.position);
@@ -160,7 +153,7 @@ fn expected_devices() -> Vec<Device> {
     ]
 }
 
-/// `UnpackSkeletonData` entries for `expected_skeletons`.
+/// Literal entries for `expected_skeletons`.
 fn skeleton_body() -> Vec<u8> {
     let mut out = Vec::new();
     put_i32(&mut out, 1);
@@ -172,7 +165,7 @@ fn skeleton_body() -> Vec<u8> {
     out
 }
 
-/// `UnpackAssetData` entries for `expected_assets`.
+/// Literal entries for `expected_assets`.
 fn asset_body() -> Vec<u8> {
     let mut out = Vec::new();
     put_i32(&mut out, 5);
@@ -184,7 +177,7 @@ fn asset_body() -> Vec<u8> {
     out
 }
 
-/// `UnpackForcePlateData` entries for `expected_force_plates`.
+/// Literal entries for `expected_force_plates`.
 fn force_plate_body() -> Vec<u8> {
     let mut out = Vec::new();
     put_i32(&mut out, 3);
@@ -197,7 +190,7 @@ fn force_plate_body() -> Vec<u8> {
     out
 }
 
-/// `UnpackDeviceData` entries for `expected_devices`.
+/// Literal entries for `expected_devices`.
 fn device_body() -> Vec<u8> {
     let mut out = Vec::new();
     put_i32(&mut out, 8);
@@ -227,8 +220,7 @@ fn put_section(out: &mut Vec<u8>, version: Version, (count, body): (i32, &[u8]))
     out.extend_from_slice(body);
 }
 
-/// A literal FrameOfData payload in `version`'s layout with empty typed
-/// sections and the given raw section bodies.
+/// A FrameOfData payload with empty typed sections and the given raw bodies.
 fn frame_payload(version: Version, sections: &Sections<'_>) -> Vec<u8> {
     let mut out = Vec::new();
     put_i32(&mut out, 55);
@@ -294,7 +286,7 @@ fn nonempty_frame_sections_decode_and_reencode_byte_exactly_per_version() {
                 assert!(assets.is_empty(), "{version} carries no assets");
             }
 
-            // from(decode(raw)) == raw, byte for byte.
+            // Raw section conversion and frame encoding preserve the fixture bytes.
             assert_eq!(
                 RawSection::from_skeletons(&skeletons),
                 Ok(frame.skeletons.clone())
@@ -311,8 +303,7 @@ fn nonempty_frame_sections_decode_and_reencode_byte_exactly_per_version() {
             assert_eq!(frame.to_payload(version), Ok(payload.clone()), "{version}");
         }
 
-        // A frame built from typed values encodes to the literal payload, and
-        // decode(from(x)) == x.
+        // Typed values encode to the fixture and decode back unchanged.
         let mut built = FrameOfData::parse_payload(
             &frame_payload(
                 version,
@@ -470,8 +461,7 @@ fn decode_named(frame: &FrameOfData, name: &str) -> natnet::Result<()> {
 #[test]
 fn residue_and_truncation_in_each_frame_section_are_refused_strictly_and_by_decode() {
     for (name, residue, truncated) in frame_section_mutations() {
-        // Residue: strict frame parsing refuses it; compatibility parsing keeps
-        // the bytes, and the typed decoder refuses them with both sizes.
+        // Strict parsing rejects residue; compatibility preserves it, while typed decoding rejects it.
         let payload = with_section(name, &residue);
         assert_eq!(
             FrameOfData::parse_payload_with_policy(&payload, Version::V4_1, ParsePolicy::Strict),
@@ -610,17 +600,13 @@ fn composite_ids_split_and_rebuild_like_the_sdk() {
     assert!(matches!(encode_id(0, -1), Err(Error::InvalidValue { .. })));
 }
 
-// ---------------------------------------------------------------------------
-// MODELDEF fixtures
-// ---------------------------------------------------------------------------
-
 struct RigidMarker {
     position: [f32; 3],
     label: i32,
     name: &'static str,
 }
 
-/// A literal `UnpackRigidBodyDescription` body and its typed value.
+/// A rigid-body description body and its typed value.
 fn rigid_body_def(
     version: Version,
     name: &str,
@@ -833,7 +819,7 @@ fn asset_def(version: Version) -> (Vec<u8>, DataSet) {
     (out, value)
 }
 
-/// Types 2–6, each with a literal body and its typed value.
+/// Types 2–6 with literal bodies and typed values.
 fn typed_datasets(version: Version) -> Vec<(i32, Vec<u8>, DataSet)> {
     [
         (TYPE_SKELETON, skeleton_def(version)),
@@ -884,12 +870,12 @@ fn typed_modeldef_datasets_round_trip_byte_exactly_per_version() {
             );
         }
         assert_eq!(
-            expected.to_payload_version(version),
+            expected.to_payload(version),
             Ok(payload.clone()),
             "{version}"
         );
 
-        // The same bytes through the generator and the versioned decoder.
+        // The generator and versioned decoder preserve the same fixture bytes.
         let wire = SyntheticServer::new(version, 1)
             .model_def_datagram(&expected)
             .expect("generator encodes");
@@ -945,7 +931,7 @@ fn v4_1_typed_body_residue_and_truncation_strict_rejects_compatible_keeps_other(
                 "type {type_id} {label}"
             );
             assert_eq!(
-                compatible.to_payload_version(Version::V4_1),
+                compatible.to_payload(Version::V4_1),
                 Ok(payload),
                 "type {type_id} {label}: no bytes lost"
             );
@@ -967,7 +953,7 @@ fn v4_1_negative_nested_count_strict_rejects_compatible_keeps_other() {
         })
     );
     assert_eq!(
-        ModelDef::parse_payload_version(&payload, Version::V4_1).map(|m| m.datasets),
+        ModelDef::parse_payload(&payload, Version::V4_1).map(|m| m.datasets),
         Ok(vec![DataSet::Other {
             type_id: TYPE_SKELETON,
             body,
@@ -1002,9 +988,9 @@ fn a_non_utf8_name_is_typed_lossily_when_strict_and_kept_verbatim_when_compatibl
             panic!("strict keeps the typed camera");
         };
         assert!(camera.name.starts_with('\u{fffd}'));
-        assert_ne!(strict.to_payload_version(version), Ok(payload.clone()));
+        assert_ne!(strict.to_payload(version), Ok(payload.clone()));
 
-        let compatible = ModelDef::parse_payload_version(&payload, version).expect("compatible");
+        let compatible = ModelDef::parse_payload(&payload, version).expect("compatible");
         assert_eq!(
             compatible.datasets,
             vec![DataSet::Other {
@@ -1013,7 +999,7 @@ fn a_non_utf8_name_is_typed_lossily_when_strict_and_kept_verbatim_when_compatibl
             }],
             "{version}"
         );
-        assert_eq!(compatible.to_payload_version(version), Ok(payload));
+        assert_eq!(compatible.to_payload(version), Ok(payload));
     }
 }
 
@@ -1030,7 +1016,7 @@ fn checked_encoding_refuses_unrepresentable_typed_datasets() {
         datasets: vec![DataSet::Skeleton(skeleton.clone())],
     };
     assert_eq!(
-        model.to_payload_version(version),
+        model.to_payload(version),
         Err(Error::TrailingBytes { remaining: 1 })
     );
     skeleton.rigid_bodies[1].tail.clear();
@@ -1038,7 +1024,7 @@ fn checked_encoding_refuses_unrepresentable_typed_datasets() {
         ModelDef {
             datasets: vec![DataSet::Skeleton(skeleton)],
         }
-        .to_payload_version(version),
+        .to_payload(version),
         Err(Error::UnexpectedEof { .. })
     ));
 
@@ -1051,7 +1037,7 @@ fn checked_encoding_refuses_unrepresentable_typed_datasets() {
         ModelDef {
             datasets: vec![DataSet::Camera(camera)],
         }
-        .to_payload_version(version),
+        .to_payload(version),
         Err(Error::InteriorNul {
             field: "camera name",
             ..
@@ -1067,7 +1053,7 @@ fn checked_encoding_refuses_unrepresentable_typed_datasets() {
         ModelDef {
             datasets: vec![DataSet::Device(device)],
         }
-        .to_payload_version(version),
+        .to_payload(version),
         Err(Error::InteriorNul {
             field: "device channel name",
             ..
@@ -1084,7 +1070,7 @@ fn checked_encoding_refuses_unrepresentable_typed_datasets() {
                 body,
             }],
         }
-        .to_payload_version(Version::new(4, 0, 0, 0))
+        .to_payload(Version::new(4, 0, 0, 0))
         .is_err()
     );
 }
@@ -1122,10 +1108,6 @@ fn cross_layout_conversion_refuses_bone_tails_but_converts_layout_free_types() {
     assert_eq!(&converted[4..], model_payload(legacy, &entries).as_slice());
 }
 
-// ---------------------------------------------------------------------------
-// Randomized robustness
-// ---------------------------------------------------------------------------
-
 fn xorshift(state: &mut u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
@@ -1133,7 +1115,7 @@ fn xorshift(state: &mut u64) -> u64 {
     *state
 }
 
-/// Checks the frame decode/encode property and returns a violation, if any.
+/// Checks frame decode/encode preservation and returns any violation.
 fn frame_property(bytes: &[u8]) -> Option<String> {
     for version in VERSIONS {
         for policy in [ParsePolicy::Strict, ParsePolicy::Compatible] {
@@ -1175,7 +1157,7 @@ fn frame_property(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Checks that every typed type 2–6 dataset a parser returns re-encodes.
+/// Checks that parsed type 2–6 datasets re-encode.
 fn model_property(bytes: &[u8]) -> Option<String> {
     for version in VERSIONS {
         for policy in [ParsePolicy::Strict, ParsePolicy::Compatible] {
@@ -1194,13 +1176,13 @@ fn model_property(bytes: &[u8]) -> Option<String> {
                     let single = ModelDef {
                         datasets: vec![dataset.clone()],
                     };
-                    if let Err(error) = single.to_payload_version(version) {
+                    if let Err(error) = single.to_payload(version) {
                         return Some(format!("{version} {policy:?}: {dataset:?}: {error}"));
                     }
                 }
             }
-            let _ = model.to_payload_version(version);
-            let _ = model.to_payload_lossy_version(version);
+            let _ = model.to_payload(version);
+            let _ = model.to_payload_lossy(version);
         }
     }
     None
@@ -1259,6 +1241,6 @@ fn random_mutations_of_typed_seeds_never_panic_and_keep_the_byte_property() {
             decoded_frames += 1;
         }
     }
-    // Reach: mutations must leave many frames whose typed sections decode.
+    // Mutations must leave enough frames with decodable typed sections.
     assert!(decoded_frames > 100, "only {decoded_frames} frames decoded");
 }

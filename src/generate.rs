@@ -1,11 +1,7 @@
-//! Synthetic **FrameOfData** generation.
+//! Synthetic FrameOfData datagrams for tests and examples.
 //!
-//! Turns a caller-supplied trajectory — positions and orientations sampled
-//! over time, in the server's native (Motive) frame — into **real NatNet
-//! wire bytes** by reusing the exact same [`FrameOfData::to_datagram`]
-//! serialize path the decoder reads back. Nothing here invents a second wire
-//! format: the generated datagrams are byte-for-byte what
-//! [`FrameOfData::parse`](crate::FrameOfData::parse) consumes.
+//! Output goes through the same [`FrameOfData::to_datagram`] encoder as real
+//! data, so it is byte-exact for the chosen version.
 //!
 //! **The round-trip rule this module inherits is the qualified one** — the
 //! one in [Round-trip, and the NaN a frame can
@@ -44,15 +40,9 @@ use crate::frame::{
 use crate::modeldef::ModelDef;
 use crate::version::Version;
 
-/// Typed skeleton, asset, force-plate and device entries a synthetic frame
-/// carries next to its planned rigid bodies.
-///
-/// The entries are encoded with [`RawSection::from_skeletons`] and its
-/// siblings, so they reach the wire through the same checked path as any
-/// other frame. Their layouts are spec-derived from the NatNet SDK 4.1.0.0
-/// (see [`Skeleton`]); a synthetic stream exercises the codec, not Motive.
-/// Only NatNet 4.1 carries assets: encoding non-empty `assets` at an older
-/// version is refused by [`FrameOfData::to_datagram`].
+/// Typed skeleton, asset, force-plate and device entries beside rigid bodies.
+/// Checked [`RawSection`] encoding uses NatNet SDK 4.1.0.0 spec-derived layouts,
+/// not confirmed against Motive. Non-empty assets are refused before 4.1.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlannedSections {
@@ -77,7 +67,7 @@ pub struct PlannedBody {
     pub position: [f32; 3],
     /// Orientation quaternion `[x, y, z, w]` in the server's native frame.
     pub orientation: [f32; 4],
-    /// Mean marker error the tracker would report, metres (`>= 0`).
+    /// Caller-supplied mean marker error in metres. This value is not validated.
     pub mean_marker_error: f32,
     /// Whether the tracker reports a valid pose this frame. `false` emits a
     /// present-but-untracked body (params bit 0 clear) — a scheduled dropout.
@@ -111,17 +101,8 @@ impl PlannedBody {
     }
 }
 
-/// A synthetic Motive-like server: fixes the protocol [`Version`], the
-/// high-resolution camera-clock frequency and the injected software-clock
-/// offset, then emits wire frames from planned body states.
-///
-/// The camera mid-exposure ticks are placed on the *true* timeline
-/// (`round(true_time · frequency)`), while the software `timestamp` is
-/// shifted by [`clock_offset_secs`](Self::clock_offset_secs). A stream with
-/// a non-zero offset is therefore *not* pre-aligned: recovering the offset is
-/// the clock estimator's job. Camera ticks saturate at `u64::MAX`; negative
-/// and NaN products become zero. The floating-point software timestamp retains
-/// non-finite values.
+/// A synthetic frame source configured with protocol [`Version`], camera
+/// clock frequency and software-clock offset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyntheticServer {
     /// The protocol bitstream version emitted (e.g. [`Version::V4_1`]).
@@ -130,15 +111,14 @@ pub struct SyntheticServer {
     /// SERVERINFO `high_res_clock_frequency`. Used to place the camera
     /// mid-exposure ticks.
     pub high_res_clock_frequency: u64,
-    /// Injected offset added to the software `timestamp` (seconds); the
-    /// camera-clock ticks are left on the true timeline so the offset is
-    /// recoverable.
+    /// Offset added to the software `timestamp` in seconds; camera-clock
+    /// ticks remain on the true timeline.
     pub clock_offset_secs: f64,
 }
 
 impl SyntheticServer {
-    /// A synthetic server at `version` with a `frequency`-tick camera clock
-    /// and a zero software-clock offset (a pre-aligned stream).
+    /// Creates a server at `version` with a `frequency`-tick camera clock and
+    /// zero software-clock offset.
     #[must_use]
     pub const fn new(version: Version, high_res_clock_frequency: u64) -> Self {
         Self {
@@ -155,14 +135,9 @@ impl SyntheticServer {
         self
     }
 
-    /// Builds a decoded-shape [`FrameOfData`] for `frame_number` at
-    /// `true_time_secs` on the true timeline, carrying `bodies`.
-    ///
-    /// The other sections (marker sets, skeletons, assets, labelled
-    /// markers, force plates, devices) are emitted **empty**, matching real
-    /// captures of an empty volume; only the rigid-body and timing content
-    /// varies. Use [`Self::frame_with_sections`] for non-empty skeletons,
-    /// assets, force plates and devices.
+    /// Builds a decoded-shape frame at `true_time_secs` with `bodies`.
+    /// Other sections are empty; use [`Self::frame_with_sections`] for typed
+    /// skeleton, asset, force-plate or device sections.
     #[must_use]
     pub fn frame(
         &self,
@@ -177,14 +152,10 @@ impl SyntheticServer {
                 position: b.position,
                 orientation: b.orientation,
                 mean_marker_error: b.mean_marker_error,
-                // Bit 0 is tracking-valid; a dropout clears it.
                 params: u16::from(b.tracking_valid),
             })
             .collect();
 
-        // Camera mid-exposure ticks live on the TRUE timeline; the software
-        // timestamp carries the injected offset. The two disagree by exactly
-        // `clock_offset_secs`, which is what a clock estimator recovers.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let camera_mid_exposure = (true_time_secs * self.high_res_clock_frequency as f64)
             .round()
@@ -217,7 +188,6 @@ impl SyntheticServer {
     /// Builds a decoded-shape [`FrameOfData`] like [`Self::frame`], with the
     /// skeleton, asset, force-plate and device sections encoded from
     /// `sections`.
-    ///
     /// # Errors
     /// Returns [`Error::LengthOverflow`](crate::Error::LengthOverflow) when a
     /// planned count or section size does not fit its `int32` wire field.
@@ -238,7 +208,6 @@ impl SyntheticServer {
 
     /// Serializes [`Self::frame_with_sections`] to a full FrameOfData
     /// datagram at this server's protocol version.
-    ///
     /// # Errors
     /// The errors of [`Self::frame_with_sections`] and [`Self::datagram`],
     /// including a refusal of non-empty assets before NatNet 4.1.
@@ -255,20 +224,18 @@ impl SyntheticServer {
 
     /// Serializes a MODELDEF describing this server's scene to a full
     /// datagram at this server's protocol version, with the checked encoder
-    /// ([`ModelDef::to_datagram_version`]). Any dataset type, including
+    /// ([`ModelDef::to_datagram`]). Any dataset type, including
     /// skeletons, force plates, devices, cameras and assets, may be emitted.
-    ///
     /// # Errors
     /// Returns the checked MODELDEF encoding errors, for example a rigid-body
     /// tail that is not a valid marker description for this version.
     pub fn model_def_datagram(&self, model: &ModelDef) -> crate::Result<Vec<u8>> {
-        model.to_datagram_version(self.version)
+        model.to_datagram(self.version)
     }
 
     /// Serializes one synthetic frame to a full FrameOfData **datagram**
     /// (4-byte header + payload) at this server's protocol version — real
     /// wire bytes a NatNet decoder parses.
-    ///
     /// # Errors
     /// Refuses unsupported versions and values the checked frame encoder
     /// cannot represent. Non-finite pose values remain wire-representable.
