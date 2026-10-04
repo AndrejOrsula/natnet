@@ -241,7 +241,7 @@ fn a_hostile_length_is_refused_before_allocating() {
         .expect_err("oversize is terminal");
     assert_eq!(retry.kind(), err.kind());
     assert_eq!(retry.to_string(), err.to_string());
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"");
     assert!(u64::try_from(MAX_RECORD_LEN).unwrap() < u64::from(u32::MAX));
     server.join().expect("server");
 }
@@ -337,7 +337,7 @@ fn partial_prefix_is_terminal_and_clears_the_incomplete_buffer() {
             .expect_err("terminal failure");
         assert_eq!(second.kind(), first.kind());
         assert_eq!(second.to_string(), first.to_string());
-        assert!(buf.is_empty());
+        assert_eq!(buf, b"");
         server.join().expect("server");
     }
 }
@@ -405,7 +405,7 @@ fn invalid_magic_is_terminal_before_the_next_read() {
         }
         other => panic!("expected source-preserving InvalidMagic, got {other:?}"),
     }
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"");
     let second = client
         .recv_record(&mut buf, Duration::from_secs(1))
         .expect_err("bad magic is terminal");
@@ -448,7 +448,7 @@ fn partial_payload_is_terminal_and_preserves_the_original_eof_context() {
         .recv_record(&mut buf, Duration::from_secs(1))
         .expect_err("partial payload fails");
     assert_eq!(first.kind(), std::io::ErrorKind::UnexpectedEof);
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"");
     let second = client
         .recv_record(&mut buf, Duration::from_secs(1))
         .expect_err("partial payload remains terminal");
@@ -491,7 +491,7 @@ fn record_deadline_is_total_and_timeout_is_terminal() {
         .recv_record(&mut buf, Duration::from_millis(100))
         .expect_err("stall exceeds total deadline");
     assert_eq!(first.kind(), std::io::ErrorKind::TimedOut);
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"");
     let second = client
         .recv_record(&mut buf, Duration::from_secs(1))
         .expect_err("timeout is terminal");
@@ -546,7 +546,7 @@ fn partial_header_reports_exact_record_extent_and_is_terminal() {
                 available: PREFIX_LEN + 3
             })
         );
-        assert!(buf.is_empty());
+        assert_eq!(buf, b"");
     }
     server.join().expect("server");
 }
@@ -627,7 +627,7 @@ fn exact_record_cap_is_accepted_and_one_byte_over_is_refused() {
                 result.expect_err("over cap rejected").kind(),
                 std::io::ErrorKind::InvalidData
             );
-            assert!(buf.is_empty());
+            assert_eq!(buf, b"");
             assert_eq!(buf.capacity(), 0, "reject before payload allocation");
         }
         server.join().expect("server");
@@ -660,7 +660,7 @@ fn byte_drip_cannot_restart_the_total_record_deadline() {
         .recv_record(&mut buf, Duration::from_millis(120))
         .expect_err("drip exceeds total deadline");
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    assert!(buf.is_empty());
+    assert_eq!(buf, b"");
     server.join().expect("server");
 }
 
@@ -1270,7 +1270,7 @@ fn a_bare_prefix_does_not_grow_the_buffer_to_its_declared_length() {
             std::io::ErrorKind::TimedOut,
             "{timeout:?}: {first:?}"
         );
-        assert!(buf.is_empty());
+        assert_eq!(buf, b"");
         assert!(
             buf.capacity() < GROWTH_BOUND,
             "{timeout:?}: twelve bytes grew the buffer to {} bytes",

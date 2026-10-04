@@ -463,7 +463,7 @@ impl ImageClient {
     /// always means end of stream. An interrupted read transferred nothing and
     /// is retried at once.
     fn read_step(&mut self, destination: &mut [u8]) -> io::Result<Step> {
-        debug_assert!(!destination.is_empty());
+        debug_assert_ne!(destination, []);
         loop {
             match self.stream.read(destination) {
                 Ok(0) => return Ok(Step::Eof),
