@@ -658,14 +658,13 @@ pub enum HandshakeError {
     UnsupportedVersion {
         /// Decoded SERVERINFO retained for diagnostics.
         info: ServerInfo,
-        /// The version validation failure.
+        /// The version validation failure, naming the stream version.
         source: NatNetError,
     },
 }
 
 impl HandshakeError {
-    /// Returns the raw negotiated information when an unsupported version was
-    /// reported by the peer.
+    /// Returns the decoded SERVERINFO when the stream layout was unsupported.
     #[must_use]
     pub fn server_info(&self) -> Option<&ServerInfo> {
         match self {
@@ -681,10 +680,11 @@ impl fmt::Display for HandshakeError {
             Self::Io(error) => write!(formatter, "command handshake I/O error: {error}"),
             Self::Command(error) => write!(formatter, "command handshake request error: {error}"),
             Self::Decode(error) => write!(formatter, "invalid SERVERINFO reply: {error}"),
-            Self::UnsupportedVersion { source, .. } => {
+            Self::UnsupportedVersion { info, source } => {
                 write!(
                     formatter,
-                    "unsupported SERVERINFO protocol version: {source}"
+                    "unsupported stream protocol version (SERVERINFO reports {}): {source}",
+                    info.protocol_version
                 )
             }
         }

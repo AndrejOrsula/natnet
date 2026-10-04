@@ -136,6 +136,51 @@ fn handshake_with_a_requested_version_validates_that_version() {
 }
 
 #[test]
+fn unsupported_requested_version_is_reported_as_the_stream_version() {
+    let server = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind server");
+    let server_addr = v4(server.local_addr().expect("server address"));
+    let reply = sample_serverinfo(Version::V4_1)
+        .to_datagram()
+        .expect("encode SERVERINFO");
+    let peer = thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        let (_, source) = server.recv_from(&mut buf).expect("receive NAT_CONNECT");
+        server.send_to(&reply, source).expect("send SERVERINFO");
+    });
+
+    let mut client = CommandClient::bind(LOOPBACK, server_addr).expect("bind client");
+    let error = client
+        .connect_handshake_with(
+            ConnectOptions::requesting(Version::new(4, 2, 0, 0)),
+            COMMAND_TIMEOUT,
+        )
+        .expect_err("an unsupported requested layout must be refused");
+    peer.join().expect("server thread");
+    // The supported server version is kept; the failure names the request.
+    let message = error.to_string();
+    match error {
+        HandshakeError::UnsupportedVersion { info, source } => {
+            assert_eq!(info.protocol_version, Version::V4_1);
+            assert!(
+                matches!(
+                    source,
+                    natnet::Error::UnsupportedVersion { major: 4, minor: 2 }
+                ),
+                "{source:?}"
+            );
+        }
+        other => panic!("expected an unsupported stream version, got {other:?}"),
+    }
+    assert!(
+        message.starts_with(&format!(
+            "unsupported stream protocol version (SERVERINFO reports {})",
+            Version::V4_1
+        )),
+        "{message}"
+    );
+}
+
+#[test]
 fn foreign_only_reply_times_out_with_peer_filtering() {
     let intended = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind intended peer");
     let intended_addr = v4(intended.local_addr().expect("intended address"));

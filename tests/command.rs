@@ -72,6 +72,11 @@ fn connect_options_use_the_sdk_layout() {
     );
     assert_eq!(ConnectOptions::parse(&[]), None);
     assert_eq!(ConnectOptions::parse(&python[..268]), None);
+    // The options end at byte 268; the trailing zero byte is not required.
+    assert_eq!(
+        ConnectOptions::parse(&python[..269]),
+        Some(ConnectOptions::requesting(Version::V4_1))
+    );
 }
 
 #[test]
@@ -92,6 +97,11 @@ fn stream_version_follows_the_sdk_rule() {
     let request = ConnectOptions::requesting(Version::V4_1);
 
     assert_eq!(request.stream_version(&newer), Version::V4_1);
+    // NatNet 3 is the first major that honours a request.
+    assert_eq!(
+        request.stream_version(&info(Version::new(3, 0, 0, 0))),
+        Version::V4_1
+    );
     // A NatNet 2 server cannot change its bitstream.
     assert_eq!(request.stream_version(&old), Version::new(2, 10, 0, 0));
     assert_eq!(

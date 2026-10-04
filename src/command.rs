@@ -199,7 +199,7 @@ impl ConnectOptions {
     pub fn parse(payload: &[u8]) -> Option<Self> {
         let flag = *payload.get(CONNECT_SENDER_LEN)?;
         let version = payload.get(CONNECT_SENDER_LEN + 1..CONNECT_SENDER_LEN + 5)?;
-        let version = Version::new(version[0], version[1], version[2], version[3]);
+        let version = Version::from_bytes(version.try_into().ok()?);
         Some(Self {
             subscribed_data_only: flag != 0,
             bitstream_version: (version != Version::new(0, 0, 0, 0)).then_some(version),
