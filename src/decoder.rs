@@ -102,10 +102,13 @@ impl DecodedMessage {
     /// Re-encodes using the original source layout.
     ///
     /// # Errors
-    /// Returns checked encoding errors, including values accepted only by
-    /// compatibility decoding that cannot be represented faithfully, such as
-    /// [`Error::LengthOverflow`](crate::Error::LengthOverflow) for the cases
-    /// above.
+    ///
+    /// Returns checked encoding errors. A decoded message can still fail, e.g.
+    /// a payload over the 65 535-byte wire limit
+    /// ([`Error::LengthOverflow`](crate::Error::LengthOverflow)), or a name
+    /// that lossy UTF-8 replacement widened past its field. Extensions kept
+    /// by [`ParsePolicy::Compatible`](crate::ParsePolicy::Compatible), such as
+    /// residue inside a sized frame section, fail checked encoding.
     pub fn to_datagram(&self) -> Result<Vec<u8>> {
         self.to_datagram_for(self.version)
     }

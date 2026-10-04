@@ -185,3 +185,31 @@ fn checked_reencode_of_an_oversized_unknown_message_is_refused() {
         })
     );
 }
+
+#[test]
+fn compatible_section_residue_fails_checked_encoding_but_survives_lossy() {
+    let mut frame = natnet::SyntheticServer::new(Version::V4_1, 1_000).frame(1, 0.0, &[]);
+    // Skeleton id 17 with zero rigid bodies, then one unexplained byte.
+    frame.skeletons = natnet::RawSection {
+        count: 1,
+        payload: vec![17, 0, 0, 0, 0, 0, 0, 0, 0xee],
+    };
+    let wire = frame.to_datagram_lossy(Version::V4_1).unwrap();
+    let decoder = Decoder::new(Version::V4_1).unwrap();
+    assert!(matches!(
+        decoder.parse(&wire),
+        Err(Error::SectionSizeMismatch { .. })
+    ));
+    let parsed = decoder
+        .with_policy(ParsePolicy::Compatible)
+        .parse(&wire)
+        .unwrap();
+    assert!(matches!(
+        parsed.to_datagram(),
+        Err(Error::SectionSizeMismatch { .. })
+    ));
+    let Message::FrameOfData(kept) = parsed.message() else {
+        panic!("frame expected")
+    };
+    assert_eq!(kept.to_datagram_lossy(Version::V4_1).unwrap(), wire);
+}
