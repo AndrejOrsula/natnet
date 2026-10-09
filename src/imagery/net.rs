@@ -99,6 +99,20 @@ const GROW_MIN: usize = 64 * 1024;
 /// Space the single post-deadline read is guaranteed, bounded by the record.
 const LATE_READ: usize = 1 << 20;
 
+/// End of the next read's window in a record buffer of `len` bytes, `filled`
+/// of them received.
+///
+/// Past the deadline, earlier growth may have left more than [`LATE_READ`]
+/// bytes of room; the single final read takes at most that, so post-deadline
+/// work stays bounded however large the buffer has grown.
+fn read_end(len: usize, filled: usize, late: bool) -> usize {
+    if late {
+        len.min(filled.saturating_add(LATE_READ))
+    } else {
+        len
+    }
+}
+
 /// A receive-only AUGI/1 TCP client.
 ///
 /// Pull whole records with [`ImageClient::recv_record`] and decode them with
@@ -335,7 +349,8 @@ impl ImageClient {
                     buf.resize(want, 0);
                 }
             }
-            match self.read_step(&mut buf[filled..]) {
+            let end = read_end(buf.len(), filled, late);
+            match self.read_step(&mut buf[filled..end]) {
                 Ok(Step::Read(count)) => {
                     filled += count;
                     if filled < total && late {
@@ -441,4 +456,23 @@ fn truncated(needed: usize, available: usize) -> io::Error {
             available,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LATE_READ, read_end};
+
+    #[test]
+    fn the_final_read_is_capped_at_late_read_even_with_more_room() {
+        let filled = 3 * LATE_READ;
+        let len = 2 * filled;
+        assert_eq!(read_end(len, filled, true), filled + LATE_READ);
+        assert_eq!(read_end(len, filled, false), len);
+    }
+
+    #[test]
+    fn the_final_read_never_reaches_past_the_buffer() {
+        assert_eq!(read_end(10, 4, true), 10);
+        assert_eq!(read_end(usize::MAX, usize::MAX - 1, true), usize::MAX);
+    }
 }
