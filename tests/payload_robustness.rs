@@ -283,9 +283,12 @@ fn every_typed_seed_is_safely_truncated_at_each_byte() {
         ServerInfo::parse_payload(bytes).is_err()
     });
 
+    // A command datagram shorter than its four-byte header is refused. Past
+    // the header, a cut value reads as the text before the cut, because
+    // Motive sends values without a NUL terminator.
     let command = envelope(natnet::NAT_RESPONSE, 0, &command_payload());
     assert!(CommandResponse::parse(&command).is_ok());
-    assert_prefixes_error("command datagram", &command, |bytes| {
+    assert_prefixes_error("command datagram header", &command[..4], |bytes| {
         CommandResponse::parse(bytes).is_err()
     });
 
@@ -294,9 +297,18 @@ fn every_typed_seed_is_safely_truncated_at_each_byte() {
         CommandResponse::parse_value_payload(&command_value).expect("value payload"),
         "ok"
     );
-    assert_prefixes_error("command value payload", &command_value, |bytes| {
-        CommandResponse::parse_value_payload(bytes).is_err()
-    });
+    for (length, text) in [(0, ""), (1, "o"), (2, "ok")] {
+        assert_eq!(
+            CommandResponse::parse(&command[..4 + length]).expect("cut datagram"),
+            CommandResponse::Value(text.to_owned()),
+            "command datagram cut after {length} payload bytes"
+        );
+        assert_eq!(
+            CommandResponse::parse_value_payload(&command_value[..length]).expect("cut payload"),
+            text,
+            "command value payload cut after {length} bytes"
+        );
+    }
 
     #[cfg(feature = "imagery")]
     {
@@ -389,10 +401,12 @@ fn structured_mutations_reach_meaningful_error_classes() {
         Err(Error::UnexpectedEof { .. })
     ));
 
-    assert!(matches!(
-        CommandResponse::parse_payload(b"bad"),
-        Err(Error::UnterminatedString { .. })
-    ));
+    // An unterminated value is text, not an error: Motive sends values
+    // without a NUL terminator.
+    assert_eq!(
+        CommandResponse::parse_payload(b"bad").expect("unterminated value"),
+        CommandResponse::Value("bad".to_owned())
+    );
     assert!(matches!(
         CommandResponse::parse(&envelope(2, 3, b"ok\0")),
         Err(Error::UnexpectedMessageId {

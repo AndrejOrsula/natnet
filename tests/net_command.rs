@@ -22,7 +22,7 @@ use natnet::net::{
     Tier1ExecutionError, Tier1Phase,
 };
 use natnet::serverinfo::ConnectionInfo;
-use natnet::{NAT_CONNECT, NAT_REQUEST, ServerInfo, Version};
+use natnet::{NAT_CONNECT, NAT_REQUEST, NAT_RESPONSE, ServerInfo, Version};
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(300);
@@ -55,6 +55,19 @@ fn command_text(datagram: &[u8]) -> String {
         .position(|&byte| byte == 0)
         .unwrap_or(payload.len());
     String::from_utf8_lossy(&payload[..end]).into_owned()
+}
+
+// The shape Motive 3.1.2.1 gives a GetProperty reply: the value's bytes with
+// no NUL, and the payload length as the declared size.
+fn unterminated(value: &str) -> Vec<u8> {
+    let mut datagram = NAT_RESPONSE.to_le_bytes().to_vec();
+    datagram.extend_from_slice(
+        &u16::try_from(value.len())
+            .expect("short value")
+            .to_le_bytes(),
+    );
+    datagram.extend_from_slice(value.as_bytes());
+    datagram
 }
 
 fn property_request(property_len: usize) -> command::Request {
@@ -459,6 +472,48 @@ fn tier1_executor_stops_after_a_reread_mismatch() {
             ..
         } if target == "cam-1"
     ));
+}
+
+#[test]
+fn tier1_executor_completes_with_unterminated_rereads() {
+    let server = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind peer");
+    let server_addr = v4(server.local_addr().expect("peer address"));
+    // Bounded, so a client that stops early cannot leave the peer waiting.
+    server
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set peer timeout");
+    let peer = thread::spawn(move || {
+        let mut request = [0u8; 512];
+        for camera in ["cam-1", "cam-2"] {
+            let (length, source) = server.recv_from(&mut request).expect("receive write");
+            assert!(
+                command_text(&request[..length]).starts_with(&format!("SetProperty,{camera},"))
+            );
+            server
+                .send_to(&CommandResponse::status_datagram(0), source)
+                .expect("send status");
+            let (length, source) = server.recv_from(&mut request).expect("receive reread");
+            assert_eq!(
+                command_text(&request[..length]),
+                format!("GetProperty,{camera},Enabled")
+            );
+            server
+                .send_to(&unterminated("true"), source)
+                .expect("send unterminated value");
+        }
+    });
+    let mut client = CommandClient::bind(LOOPBACK, server_addr).expect("bind client");
+    let write = Tier1Write::camera_enabled(vec!["cam-1".to_owned(), "cam-2".to_owned()], true)
+        .expect("build Tier-1 write");
+    let progress = client
+        .execute_tier1(write, COMMAND_TIMEOUT)
+        .expect("both targets verify");
+    peer.join().expect("peer thread");
+    assert_eq!(progress.len(), 2);
+    for (record, camera) in progress.iter().zip(["cam-1", "cam-2"]) {
+        assert_eq!(record.target(), camera);
+        assert_eq!(record.reread(), "true");
+    }
 }
 
 #[test]

@@ -850,11 +850,10 @@ impl CanaryStep {
         self.finish(None, echo)
     }
 
-    /// Decodes the ambiguous generic response as a value and verifies it.
-    /// A four-byte payload is intentionally treated as a status here; callers
-    /// that sent this step's GetProperty request should use
-    /// [`CommandResponse::parse_value`] and [`Self::verify_echo`] for the
-    /// documented Motive ambiguity.
+    /// Decodes a generic response as a value and verifies it. Four-byte
+    /// payloads parse as status, including Motive's unterminated `true`; for
+    /// GetProperty use [`CommandResponse::parse_value`] with
+    /// [`Self::verify_echo`].
     ///
     /// # Errors
     /// [`CommandError::Wire`], [`CommandError::UnverifiableReply`],
@@ -1080,21 +1079,26 @@ impl SetProperty {
     }
 }
 
-/// A parsed NAT_RESPONSE (id 3).
+/// Parsed NAT_RESPONSE (id 3).
 ///
-/// Motive's response convention treats exactly four payload bytes as an
-/// integer status and every other payload length as a NUL-terminated value.
-/// That rule is not injective: a three-byte value plus its terminator is four
-/// bytes and therefore parses as a status. [`CommandResponse::parse`] keeps
-/// that documented rule. A caller that knows the request was GetProperty must
-/// use [`CommandResponse::parse_value`] or [`CommandResponse::parse_value_payload`], which resolves the
-/// ambiguity from request context and reads the NUL-terminated value at every
-/// length.
+/// A payload of exactly four bytes is read as an integer status; the
+/// SetProperty status layout has not been confirmed against a live server.
+/// Any other payload is a textual value: its bytes up to the first NUL, or
+/// the whole payload when it has none.
+///
+/// Motive 3.1.2.1 (NatNet 4.1.0.0) sends GetProperty values without a NUL.
+/// In a read-only sweep on 2026-10-10 (55 node-property pairs, each read
+/// once), no reply had one; payloads were 1, 4, 5, 8 and 10 bytes long, and
+/// `Enabled` arrived as the four bytes `true`. So a four-character value has
+/// the status length, and only the request knows which was meant:
+/// GetProperty callers should use [`CommandResponse::parse_value`] or
+/// [`CommandResponse::parse_value_payload`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandResponse {
     /// A four-byte integer status.
     Status(i32),
-    /// A NUL-terminated textual value.
+    /// A textual value: the payload up to its first NUL, or all of it when
+    /// there is none. Invalid UTF-8 is replaced with U+FFFD.
     Value(String),
 }
 
@@ -1102,45 +1106,43 @@ impl CommandResponse {
     /// Parses a complete NAT_RESPONSE datagram.
     ///
     /// # Errors
-    ///
-    /// Returns the underlying NatNet decode error for a wrong message ID or
-    /// malformed payload.
+    /// [`Error::UnexpectedEof`] for a datagram shorter than the 4-byte
+    /// header; [`Error::UnexpectedMessageId`] when the header is not
+    /// [`NAT_RESPONSE`].
     pub fn parse(datagram: &[u8]) -> Result<Self> {
         Self::parse_payload(message::expect(datagram, NAT_RESPONSE)?)
     }
 
-    /// Parses a NAT_RESPONSE payload using Motive's length convention.
+    /// Parses a NAT_RESPONSE payload by its length alone: four bytes are a
+    /// status, any other length a value.
     ///
     /// # Errors
-    ///
-    /// Returns the underlying NatNet decode error for an unterminated value.
+    /// None for any payload; the `Result` keeps the signature stable.
     pub fn parse_payload(payload: &[u8]) -> Result<Self> {
         if payload.len() == 4 {
             let mut reader = Reader::new(payload);
             return Ok(Self::Status(reader.i32()?));
         }
-        let mut reader = Reader::new(payload);
-        Ok(Self::Value(reader.cstr()?))
+        Self::parse_value_payload(payload).map(Self::Value)
     }
 
     /// Parses a NAT_RESPONSE datagram known by its request to carry a value.
     ///
     /// # Errors
-    ///
-    /// Returns the underlying NatNet decode error for a wrong message ID or
-    /// unterminated value.
+    /// [`Error::UnexpectedEof`] for a datagram shorter than the 4-byte
+    /// header; [`Error::UnexpectedMessageId`] when the header is not
+    /// [`NAT_RESPONSE`].
     pub fn parse_value(datagram: &[u8]) -> Result<String> {
         Self::parse_value_payload(message::expect(datagram, NAT_RESPONSE)?)
     }
 
-    /// Parses a request-context value payload at every payload length.
+    /// Parses a request-context value payload at every payload length: the
+    /// text up to the first NUL, or the whole payload when it has none.
     ///
     /// # Errors
-    ///
-    /// Returns the underlying NatNet decode error when no NUL terminator is
-    /// present.
+    /// None for any payload; the `Result` keeps the signature stable.
     pub fn parse_value_payload(payload: &[u8]) -> Result<String> {
-        Reader::new(payload).cstr()
+        Reader::new(payload).fixed_cstr(payload.len())
     }
 
     /// Builds a status datagram for tests and mock peers.

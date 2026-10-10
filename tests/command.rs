@@ -8,7 +8,9 @@ use natnet::command::{
     WriteTier, classify_property,
 };
 use natnet::serverinfo::ConnectionInfo;
-use natnet::{Error, NAT_CONNECT, NAT_REQUEST, NAT_REQUEST_MODELDEF, ServerInfo, Version};
+use natnet::{
+    Error, NAT_CONNECT, NAT_REQUEST, NAT_REQUEST_MODELDEF, NAT_RESPONSE, ServerInfo, Version,
+};
 
 // Decode a validated command request for readable wire assertions.
 #[allow(clippy::expect_used)]
@@ -27,6 +29,20 @@ fn status_ok() -> Vec<u8> {
 
 fn value(value: &str) -> Vec<u8> {
     CommandResponse::value_datagram(value)
+}
+
+// The shape Motive 3.1.2.1 gives a GetProperty reply: the value's bytes with
+// no NUL, and the payload length as the declared size.
+#[allow(clippy::expect_used)]
+fn unterminated(value: &str) -> Vec<u8> {
+    let mut datagram = NAT_RESPONSE.to_le_bytes().to_vec();
+    datagram.extend_from_slice(
+        &u16::try_from(value.len())
+            .expect("short value")
+            .to_le_bytes(),
+    );
+    datagram.extend_from_slice(value.as_bytes());
+    datagram
 }
 
 #[test]
@@ -419,6 +435,8 @@ fn command_response_parses_status_and_value() {
     );
 }
 
+// `value_datagram` adds a NUL, so three characters fill four bytes. Motive
+// sends values without one, so on its wire the collision is at four.
 #[test]
 fn three_byte_values_have_the_documented_literal_status_codes() {
     for (text, status) in [
@@ -440,6 +458,7 @@ fn three_byte_values_have_the_documented_literal_status_codes() {
     }
 }
 
+// Three characters with `value_datagram`'s NUL; four on Motive's wire.
 #[test]
 fn ambiguity_population_collides_exactly_at_three_bytes() {
     const ALPHABET: [&[u8]; 6] = [b"a", b"1", b".", b"Z", "\u{e9}".as_bytes(), b"\x7f"];
@@ -490,10 +509,11 @@ fn request_context_reads_value_at_every_payload_length() {
         CommandResponse::parse_value(&CommandResponse::status_datagram(49)).unwrap(),
         "1"
     );
-    assert!(matches!(
-        CommandResponse::parse_value(&CommandResponse::status_datagram(-1)),
-        Err(Error::UnterminatedString { .. })
-    ));
+    // No NUL: the whole payload is the value, invalid UTF-8 replaced.
+    assert_eq!(
+        CommandResponse::parse_value(&CommandResponse::status_datagram(-1)).unwrap(),
+        "\u{fffd}".repeat(4)
+    );
     assert!(matches!(
         CommandResponse::parse_value(command::connect_request().unwrap().as_bytes()),
         Err(Error::UnexpectedMessageId { expected: 3, .. })
@@ -505,6 +525,81 @@ fn request_context_reads_value_at_every_payload_length() {
 }
 
 #[test]
+// Motive 3.1.2.1 sends GetProperty values without a NUL (read-only sweep,
+// 2026-10-10).
+fn unterminated_values_read_to_the_payload_end() {
+    for text in ["1", "2", "error", "1.000000", "100.000000", "4294967295"] {
+        let reply = unterminated(text);
+        assert_eq!(CommandResponse::parse_value(&reply).unwrap(), text);
+        assert_eq!(
+            CommandResponse::parse(&reply).unwrap(),
+            CommandResponse::Value(text.into())
+        );
+    }
+    assert_eq!(CommandResponse::parse_value(&unterminated("")).unwrap(), "");
+    assert_eq!(
+        CommandResponse::parse(&unterminated("")).unwrap(),
+        CommandResponse::Value(String::new())
+    );
+    // A NUL still ends the value, and what follows it is ignored.
+    assert_eq!(
+        CommandResponse::parse_value_payload(b"1\0stale").unwrap(),
+        "1"
+    );
+}
+
+#[test]
+// Without a NUL, four-character values have the status length.
+fn four_byte_unterminated_values_need_the_request_context() {
+    for text in ["true", "1510", "1511"] {
+        let reply = unterminated(text);
+        let bytes: [u8; 4] = text.as_bytes().try_into().unwrap();
+        assert_eq!(
+            CommandResponse::parse(&reply).unwrap(),
+            CommandResponse::Status(i32::from_le_bytes(bytes))
+        );
+        assert_eq!(CommandResponse::parse_value(&reply).unwrap(), text);
+    }
+}
+
+#[test]
+fn canary_verifies_unterminated_rereads() {
+    let enable = || {
+        Tier1Write::camera_enabled(vec!["cam-1".into(), "cam-2".into()], true)
+            .unwrap()
+            .begin()
+    };
+    let verified = enable()
+        .verify_status(&status_ok(), &unterminated("true"))
+        .unwrap();
+    assert_eq!(verified.progress()[0].reread(), "true");
+    assert_eq!(verified.next().unwrap().target(), "cam-2");
+    // `verify` reads any four bytes as a status, so "true" needs `verify_status`.
+    assert!(matches!(
+        enable().verify(&unterminated("true")),
+        Err(CommandError::UnverifiableReply)
+    ));
+    assert!(matches!(
+        enable().verify_status(&status_ok(), &unterminated("false")),
+        Err(CommandError::RereadMismatch { ref found, .. }) if found == "false"
+    ));
+
+    let mode = || {
+        Tier1Write::camera_video_mode(vec!["cam-1".into()], 2)
+            .unwrap()
+            .begin()
+    };
+    assert!(
+        mode()
+            .verify_status(&status_ok(), &unterminated("2"))
+            .is_ok()
+    );
+    assert!(mode().verify(&unterminated("2")).is_ok());
+}
+
+#[test]
+// Uses value context to verify ambiguous three-byte canary echoes (three
+// characters with `value_datagram`'s NUL; four on Motive's wire).
 fn three_byte_canary_echo_uses_the_request_context_escape() {
     let plan = || Tier1Write::camera_video_mode(vec!["cam-1".into(), "cam-2".into()], 100).unwrap();
     let step = plan().begin();
