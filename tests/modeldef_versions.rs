@@ -371,6 +371,49 @@ fn v4_1_sizes_bound_unknown_and_known_opaque_bodies() {
 }
 
 #[test]
+fn checked_encoding_rejects_other_bodies_with_a_typed_type_2_to_6_representation() {
+    for version in [
+        Version::new(3, 0, 0, 0),
+        Version::new(3, 1, 0, 0),
+        Version::new(4, 0, 0, 0),
+        Version::V4_1,
+    ] {
+        // Legacy 3.x rigid-body layouts omit marker names; 4.x layouts include them.
+        let marker_name = (version.major == 4).then_some("marker");
+        let typed_datasets = known_typed(marker_name);
+        for (type_id, body) in known_bodies(marker_name) {
+            if !(TYPE_SKELETON..=TYPE_ASSET).contains(&type_id) {
+                continue;
+            }
+            let typed = typed_datasets
+                .iter()
+                .find(|dataset| dataset.type_id() == type_id)
+                .expect("each type 2–6 fixture has a typed value")
+                .clone();
+            assert!(
+                ModelDef {
+                    datasets: vec![typed],
+                }
+                .to_payload(version)
+                .is_ok(),
+                "{version} type {type_id} typed control encodes"
+            );
+            let model = ModelDef {
+                datasets: vec![DataSet::Other { type_id, body }],
+            };
+            assert_eq!(
+                model.to_payload(version),
+                Err(Error::InvalidValue {
+                    field: "dataset type",
+                    reason: "known dataset body has a typed representation",
+                }),
+                "{version} type {type_id} reaches the typed-alias guard"
+            );
+        }
+    }
+}
+
+#[test]
 fn compatible_rigid_body_parse_keeps_opaque_tail_but_checked_encode_rejects_it() {
     let mut body = cstr("body");
     body.extend_from_slice(&i32_bytes(1));
