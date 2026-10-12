@@ -36,6 +36,7 @@ required-features = ["imagery", "net"]
 [[example]]
 name = "probe"
 required-features = ["net"]
+test = true
 
 [package.metadata.docs.rs]
 all-features = true
@@ -47,6 +48,12 @@ nalgebra = { version = "0.35", default-features = false, features = ["std"], opt
 
 [dev-dependencies]
 serde_test = "1.0.177"
+
+[target.'cfg(any(unix, windows))'.dev-dependencies]
+if-addrs = { version = "0.15", features = ["link-local"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
