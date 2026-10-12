@@ -802,6 +802,17 @@ fn write_marker_def_fixed(w: &mut Writer, marker: &MarkerDef) {
     w.u16(marker.params);
 }
 
+fn other_has_typed_roundtrip(type_id: i32, body: &[u8], layout: Layout, version: Version) -> bool {
+    let mut reader = Reader::new(body);
+    let Ok(Some(dataset)) = read_described(type_id, &mut reader, layout) else {
+        return false;
+    };
+    if reader.finish().is_err() {
+        return false;
+    }
+    encode_dataset(&dataset, layout, version).is_ok_and(|encoded| encoded == body)
+}
+
 fn encode_dataset(dataset: &DataSet, layout: Layout, version: Version) -> Result<Vec<u8>> {
     let mut w = Writer::new();
     match dataset {
@@ -879,6 +890,14 @@ fn encode_dataset(dataset: &DataSet, layout: Layout, version: Version) -> Result
                 return Err(Error::InvalidValue {
                     field: "dataset type",
                     reason: "type 0 and type 1 require their typed representation",
+                });
+            }
+            if (TYPE_SKELETON..=TYPE_ASSET).contains(type_id)
+                && other_has_typed_roundtrip(*type_id, body, layout, version)
+            {
+                return Err(Error::InvalidValue {
+                    field: "dataset type",
+                    reason: "known dataset body has a typed representation",
                 });
             }
             if !layout.has_section_sizes() {

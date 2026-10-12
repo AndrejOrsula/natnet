@@ -3,36 +3,13 @@
 //! Output goes through the same [`FrameOfData::to_datagram`] encoder as real
 //! data, so it is byte-exact for the chosen version.
 //!
-//! **The round-trip rule this module inherits is the qualified one** — the
-//! one in [Round-trip, and the NaN a frame can
-//! carry](crate::frame#round-trip-and-the-nan-a-frame-can-carry), not an
-//! unconditional `parse(serialize(x)) == x`. Two of that rule's conditions
-//! bear on a *generator* in particular. The frames here are **constructed,
-//! not parsed**, so they are outside the population the rule quantifies over;
-//! and [`PlannedBody::tracked`] takes its `position` and `orientation`
-//! straight from the caller, with no `is_nan` or `is_finite` filter anywhere
-//! in this module. Plan a NaN and you get a datagram whose bytes reproduce
-//! exactly and whose parsed value is **not equal even to itself** — it is the
-//! comparison that fails, never the bytes.
-//!
-//! # Sans-io, deterministic, plain arrays
-//!
-//! Like the rest of the crate this is pure data → bytes: no socket, no
-//! clock, no RNG. Pose/quaternion fields are plain `[f32; N]` arrays in the
-//! server's native frame (the Y-up→Z-up opinion is the consumer's, exactly
-//! as for parsing). The same inputs always produce the same bytes.
-//!
-//! # Two things a synthetic stream must reproduce honestly
-//!
-//! - **Dropouts.** A [`PlannedBody`] with `tracking_valid == false` is
-//!   emitted as a present-but-untracked rigid body (params bit 0 clear), as
-//!   a real Motive capture carried a `CW-500 wand`. The NatNet decoder
-//!   retains it; the consumer maps tracking-invalid poses to gaps.
-//! - **Injected clock offset.** The server's *software* timestamp is shifted
-//!   by [`SyntheticServer::clock_offset_secs`] relative to the camera
-//!   mid-exposure ticks, so a clock estimator under test has a real offset
-//!   to recover from the `(software timestamp, camera-clock)` pair rather
-//!   than a pre-aligned stream.
+//! - Poses are plain arrays in the server's frame, passed through as given
+//!   (NaNs included; see [float equality](crate::frame#round-trip-and-float-equality)).
+//! - A dropout stays in the frame with its tracking-valid bit clear.
+//! - Camera ticks are true time × clock frequency in `f64`, rounded; negative
+//!   or NaN times become zero and overflow saturates. At extreme times or
+//!   frequencies, `f64` precision may skip adjacent integer ticks.
+//! - Software timestamps add the configured offset.
 
 use crate::frame::{
     Asset, Device, ForcePlate, FrameOfData, FrameTiming, RawSection, RigidBody, Skeleton,
@@ -107,9 +84,9 @@ impl PlannedBody {
 pub struct SyntheticServer {
     /// The protocol bitstream version emitted (e.g. [`Version::V4_1`]).
     pub version: Version,
-    /// Camera high-resolution clock frequency (ticks per second), the
-    /// SERVERINFO `high_res_clock_frequency`. Used to place the camera
-    /// mid-exposure ticks.
+    /// SERVERINFO `high_res_clock_frequency`, in ticks per second. Converted
+    /// to `f64` for tick calculation, so extreme frequencies can lose integer
+    /// precision.
     pub high_res_clock_frequency: u64,
     /// Offset added to the software `timestamp` in seconds; camera-clock
     /// ticks remain on the true timeline.
