@@ -636,8 +636,8 @@ impl ModelDef {
                 let start = r.position();
                 walk_dataset(&mut r, type_id, layout, version)?;
                 let end = r.position();
-                let body = r.span(start, end)?.to_vec();
-                datasets.push(parse_dataset(type_id, &body, layout, version, policy)?);
+                let body = r.span(start, end)?;
+                datasets.push(parse_dataset(type_id, body, layout, version, policy)?);
             }
         }
 

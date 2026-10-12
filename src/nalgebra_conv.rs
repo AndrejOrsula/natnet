@@ -9,7 +9,7 @@ use crate::frame::RigidBody;
 /// Rigid-body position as an `nalgebra` point (metres, native frame).
 impl From<&RigidBody> for Point3<f32> {
     fn from(rb: &RigidBody) -> Self {
-        Point3::new(rb.position[0], rb.position[1], rb.position[2])
+        Self::new(rb.position[0], rb.position[1], rb.position[2])
     }
 }
 
@@ -17,7 +17,7 @@ impl From<&RigidBody> for Point3<f32> {
 impl From<&RigidBody> for Quaternion<f32> {
     fn from(rb: &RigidBody) -> Self {
         let [x, y, z, w] = rb.orientation;
-        Quaternion::new(w, x, y, z)
+        Self::new(w, x, y, z)
     }
 }
 

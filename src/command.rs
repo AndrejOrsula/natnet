@@ -1221,7 +1221,7 @@ pub enum CommandError {
     /// that preceded it.
     VerificationFailed {
         /// The failure for the current target.
-        source: Box<CommandError>,
+        source: Box<Self>,
         /// Ordered records completed before the failure.
         progress: Vec<ProgressRecord>,
     },

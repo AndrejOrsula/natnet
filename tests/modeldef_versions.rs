@@ -510,7 +510,7 @@ fn strict_policy_rejects_marker_residue_and_negative_dataset_count() {
         Err(Error::TrailingBytes { remaining: 1 })
     ));
 
-    let mut top_level_residue = canonical.clone();
+    let mut top_level_residue = canonical;
     top_level_residue.push(0xbb);
     assert_eq!(
         ModelDef::parse_payload(&top_level_residue, Version::V4_1)

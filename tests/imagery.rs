@@ -258,6 +258,31 @@ fn header_longer_than_known_is_forward_compatible() {
 }
 
 #[test]
+fn known_hello_and_camera_desc_payloads_reject_declared_residue() {
+    let hello = sample_hello().to_record().expect("encode Hello");
+    let mut extra_hello = hello.clone();
+    extra_hello.push(0xA5);
+    let payload_len = u32::from_le_bytes(extra_hello[8..12].try_into().unwrap()) + 1;
+    extra_hello[8..12].copy_from_slice(&payload_len.to_le_bytes());
+    assert!(parse_record(&extra_hello).is_err());
+
+    let rays = sample_rays();
+    let camera = sample_camera_desc(&rays)
+        .to_record()
+        .expect("encode camera");
+    let mut extra_camera = camera;
+    extra_camera.push(0xA5);
+    let payload_len = u32::from_le_bytes(extra_camera[8..12].try_into().unwrap()) + 1;
+    extra_camera[8..12].copy_from_slice(&payload_len.to_le_bytes());
+    assert!(parse_record(&extra_camera).is_err());
+
+    // Bytes after one complete record still belong to the next stream record.
+    let mut concatenated = hello;
+    concatenated.extend_from_slice(&imagery::heartbeat_record());
+    assert!(matches!(parse_record(&concatenated), Ok(Record::Hello(_))));
+}
+
+#[test]
 fn header_shorter_than_known_is_refused() {
     // Appending is safe; removing is not. A short header must be an Err.
     let hello = sample_hello();

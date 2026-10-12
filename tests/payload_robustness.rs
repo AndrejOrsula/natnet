@@ -366,7 +366,7 @@ fn structured_mutations_reach_meaningful_error_classes() {
         Err(Error::ImplausibleCount { .. } | Error::InvalidCount { .. })
     ));
 
-    let mut unterminated_frame_name = frame.clone();
+    let mut unterminated_frame_name = frame;
     for byte in &mut unterminated_frame_name[16..] {
         if *byte == 0 {
             *byte = 1;
@@ -385,7 +385,7 @@ fn structured_mutations_reach_meaningful_error_classes() {
         Err(Error::ImplausibleCount { .. } | Error::InvalidCount { .. })
     ));
 
-    let mut model_name = model.clone();
+    let mut model_name = model;
     for byte in &mut model_name[12..24] {
         if *byte == 0 {
             *byte = b'X';
@@ -439,7 +439,7 @@ fn structured_mutations_reach_meaningful_error_classes() {
             assert!(matches!(oversized_result, Err(Error::UnexpectedEof { .. })));
         }
 
-        let mut short_header = record.clone();
+        let mut short_header = record;
         short_header[6..8].copy_from_slice(&1u16.to_le_bytes());
         assert!(matches!(
             natnet::imagery::parse_record(&short_header),
@@ -472,7 +472,7 @@ fn explicit_parse_policy_pins_compatibility_and_strict_errors() {
         Err(Error::TrailingBytes { remaining: 1 })
     ));
 
-    let mut bad_typed_count = frame.clone();
+    let mut bad_typed_count = frame;
     bad_typed_count[4..8].copy_from_slice(&(-1i32).to_le_bytes());
     assert_eq!(
         FrameOfData::parse_payload(&bad_typed_count, Version::V4_1),
@@ -504,7 +504,7 @@ fn explicit_parse_policy_pins_compatibility_and_strict_errors() {
     ));
 
     let server = server_payload();
-    let mut server_suffix = server.clone();
+    let mut server_suffix = server;
     server_suffix.push(0xcc);
     assert!(ServerInfo::parse_payload(&server_suffix).is_ok());
     assert!(matches!(

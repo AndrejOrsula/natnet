@@ -735,16 +735,21 @@ fn lossy_typed_section<T>(
     sized: bool,
     mut entry: impl FnMut(&mut Writer, &T),
 ) {
-    let mut body = Writer::new();
-    for item in items {
-        entry(&mut body, item);
-    }
-    let body = body.into_vec();
     w.i32(i32::try_from(items.len()).unwrap_or(i32::MAX));
+    let size_at = w.len();
     if sized {
-        w.i32(i32::try_from(body.len()).unwrap_or(i32::MAX));
+        w.i32(0);
     }
-    w.bytes(&body);
+    let body_start = w.len();
+    for item in items {
+        entry(w, item);
+    }
+    if sized {
+        w.patch_i32(
+            size_at,
+            i32::try_from(w.len() - body_start).unwrap_or(i32::MAX),
+        );
+    }
 }
 
 fn checked_raw_section(
@@ -754,9 +759,8 @@ fn checked_raw_section(
     count_field: &'static str,
     size_field: &'static str,
 ) -> Result<()> {
-    // The nested raw grammar was already checked by `validate_for_layout`,
-    // which `to_payload` runs first for every raw section this writes.
-    crate::bytes::checked_i32(s.payload.len(), size_field)?;
+    // `to_payload` validates the nested grammar before encoding.
+    let payload_len = crate::bytes::checked_i32(s.payload.len(), size_field)?;
     if s.count < 0 {
         return Err(Error::InvalidValue {
             field: count_field,
@@ -765,7 +769,7 @@ fn checked_raw_section(
     }
     w.i32(s.count);
     if sized {
-        w.i32(crate::bytes::checked_i32(s.payload.len(), size_field)?);
+        w.i32(payload_len);
     }
     w.bytes(&s.payload);
     Ok(())

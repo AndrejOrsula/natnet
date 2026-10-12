@@ -249,7 +249,7 @@ fn a_wire_nan_reproduces_the_payload_bytes_and_costs_value_equality() {
     // Now a NaN off the wire, in `timing.timestamp` — the one float slot
     // every frame has, whatever its section counts.
     let at = only_occurrence(&wire, &clean.timing.timestamp.to_le_bytes());
-    let mut nan_wire = wire.clone();
+    let mut nan_wire = wire;
     nan_wire[at..at + 8].copy_from_slice(&NAN_F64_BITS.to_le_bytes());
     let x = FrameOfData::parse_payload(&nan_wire, v).expect("a NaN frame still parses");
     assert!(x.timing.timestamp.is_nan(), "the slot really holds a NaN");
@@ -281,7 +281,7 @@ fn a_wire_nan_in_an_f32_slot_behaves_exactly_as_the_f64_one_does() {
         clean.rigid_bodies[0].position[0]
     );
 
-    let mut nan_wire = wire.clone();
+    let mut nan_wire = wire;
     nan_wire[at..at + 4].copy_from_slice(&NAN_F32_BITS.to_le_bytes());
     let x = FrameOfData::parse_payload(&nan_wire, v).expect("parse");
     assert!(x.rigid_bodies[0].position[0].is_nan());
@@ -310,7 +310,7 @@ fn a_frame_with_every_section_empty_still_has_a_nan_reachable_slot() {
     assert_eq!(c, c.clone());
 
     let at = only_occurrence(&wire, &empty.timing.timestamp.to_le_bytes());
-    let mut nan_wire = wire.clone();
+    let mut nan_wire = wire;
     nan_wire[at..at + 8].copy_from_slice(&NAN_F64_BITS.to_le_bytes());
     let x = FrameOfData::parse_payload(&nan_wire, v).expect("parse");
     assert_eq!(
@@ -616,7 +616,7 @@ fn a_lossy_marker_set_name_costs_payload_bytes_and_not_value_equality() {
     );
 
     let at = only_occurrence(&clean, b"zq");
-    let mut wire = clean.clone();
+    let mut wire = clean;
     wire[at] = 0xff; // not UTF-8, and not a NUL, so the name still terminates
     let x = FrameOfData::parse_payload(&wire, v).expect("parse");
     assert_eq!(x.marker_sets[0].name, "\u{fffd}q");
