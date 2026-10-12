@@ -705,7 +705,7 @@ impl ModelDef {
         w.i32(i32::try_from(self.datasets.len()).unwrap_or(i32::MAX));
         for dataset in &self.datasets {
             let type_id = dataset.type_id();
-            let body = encode_dataset_lossy(dataset, layout);
+            let body = encode_dataset_lossy(dataset);
             w.i32(type_id);
             if layout.has_section_sizes() {
                 w.i32(i32::try_from(body.len()).unwrap_or(i32::MAX));
@@ -937,7 +937,7 @@ fn lossy_names(w: &mut Writer, names: &[String]) {
     }
 }
 
-fn encode_dataset_lossy(dataset: &DataSet, layout: Layout) -> Vec<u8> {
+fn encode_dataset_lossy(dataset: &DataSet) -> Vec<u8> {
     let mut w = Writer::new();
     match dataset {
         DataSet::MarkerSet(marker_set) => {
@@ -982,6 +982,5 @@ fn encode_dataset_lossy(dataset: &DataSet, layout: Layout) -> Vec<u8> {
         }
         DataSet::Other { body, .. } => w.bytes(body),
     }
-    let _ = layout;
     w.into_vec()
 }

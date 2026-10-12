@@ -1,16 +1,16 @@
 //! Validated NatNet command requests and guarded property writes.
 //!
-//! Command requests are validated before they are framed. A [`Request`] owns
-//! immutable bytes and private metadata describing the operation that produced
-//! them; it has no raw-byte constructor or mutable byte view. A transport can
-//! read [`Request::as_bytes`] and remains responsible for the actual send
-//! limits. The optional `net` client accepts these requests rather than
-//! arbitrary byte slices.
-//!
-//! Tier-1 writes are consuming state machines. [`Tier1Write::begin`] exposes
-//! the first target only. Its write status and value re-read must be observed
-//! before [`CanaryStep::verify_status`] unlocks one next target. No batch of
-//! unverified datagrams can be obtained from this module.
+//! - Build requests with [`connect_request`], [`request_modeldef`],
+//!   [`get_property`] and friends. A [`Request`] is immutable bytes that the
+//!   `net` client accepts in place of raw slices; the transport still
+//!   enforces size limits.
+//! - For a read-only request, pass it to `net::CommandClient::exchange`;
+//!   `examples/probe.rs` shows the handshake and MODELDEF request.
+//! - Tier-1 writes ([`Tier1Write`]) go one target at a time: each step's
+//!   status and re-read must verify before the next target is unlocked.
+//! - Tier-2 writes ([`Tier2Write`]) need an explicit [`Tier2Grant`].
+//! - Writes to unrecognized properties are refused. For raw bytes, use
+//!   `net::RawCommandClient`.
 
 use std::collections::VecDeque;
 

@@ -3,7 +3,7 @@
 
 #![allow(
     clippy::expect_used,
-    reason = "the robustness oracle expects worker joins after explicitly bounding their lifetime"
+    reason = "the robustness tests expect valid fixtures and baseline controls before malformed-input checks"
 )]
 
 use std::panic::catch_unwind;

@@ -64,6 +64,31 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Where to start
+//!
+//! 1. With `net`, call `net::CommandClient::connect_handshake` to get
+//!    [`ServerInfo::protocol_version`]. The `examples/probe.rs` example shows
+//!    the full exchange.
+//! 2. Build a [`Decoder`] for that version and [`parse`](Decoder::parse) each
+//!    datagram; inspect [`Message`] for [`ModelDef`] or [`FrameOfData`].
+//! 3. Read the [`command`] API and the `net` module docs for requests and socket
+//!    clients.
+//!
+//! See [`Decoder`] and [`ParsePolicy`] for parsing policies; encoder limits are
+//! documented on each method's `# Errors` section.
+//!
+//! See [frame round-trip and float equality](crate::frame#round-trip-and-float-equality)
+//! for preservation limits, and [`Version`] for supported layouts. Poses are
+//! plain arrays in the server's frame.
+//!
+//! # Features
+//!
+//! - `net`: std UDP clients. Peer filtering is not authentication.
+//! - `imagery`: the AUGI/1 codec (not part of NatNet); its TCP
+//!   `imagery::net::ImageClient` requires both `imagery` and `net`.
+//! - `serde`: derives on value types.
+//! - `nalgebra`: one-way conversions from plain arrays.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]

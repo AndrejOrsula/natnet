@@ -470,9 +470,17 @@ const LABELED_MARKER_BYTES: usize = 26;
 /// Minimum structural entry size: id and count.
 const MIN_RAW_ENTRY_BYTES: usize = 8;
 
-/// Reads one frame rigid body. NatNet SDK 4.1.0.0 `PacketClient.cpp`
-/// `UnpackRigidBodyData`, `UnpackSkeletonData` and `UnpackAssetRigidBodyData`
-/// share this 38-byte layout for NatNet >= 3.0.
+fn read_marker_set(r: &mut Reader<'_>) -> Result<MarkerSet> {
+    let name = r.cstr()?;
+    let n = typed_count(r)?;
+    let n = count_len(r, n, 12)?;
+    let mut markers = vec_for_count(n);
+    for _ in 0..n {
+        markers.push(r.vec3()?);
+    }
+    Ok(MarkerSet { name, markers })
+}
+
 fn read_rigid_body(r: &mut Reader<'_>) -> Result<RigidBody> {
     Ok(RigidBody {
         id: r.i32()?,
@@ -874,27 +882,9 @@ impl FrameOfData {
         let frame_number = r.i32()?;
 
         let marker_sets = if layout.has_section_sizes() {
-            sized_typed_section(&mut r, 5, policy, |r| {
-                let name = r.cstr()?;
-                let n = typed_count(r)?;
-                let n = count_len(r, n, 12)?;
-                let mut markers = vec_for_count(n);
-                for _ in 0..n {
-                    markers.push(r.vec3()?);
-                }
-                Ok(MarkerSet { name, markers })
-            })?
+            sized_typed_section(&mut r, 5, policy, read_marker_set)?
         } else {
-            legacy_typed_section(&mut r, 5, |r| {
-                let name = r.cstr()?;
-                let n = typed_count(r)?;
-                let n = count_len(r, n, 12)?;
-                let mut markers = vec_for_count(n);
-                for _ in 0..n {
-                    markers.push(r.vec3()?);
-                }
-                Ok(MarkerSet { name, markers })
-            })?
+            legacy_typed_section(&mut r, 5, read_marker_set)?
         };
 
         let other_markers = if layout.has_section_sizes() {

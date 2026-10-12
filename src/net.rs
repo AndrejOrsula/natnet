@@ -5,15 +5,15 @@
 //!   and bounds every exchange by a deadline.
 //! - [`RawCommandClient`]: unrestricted datagrams and socket controls.
 //!
-//! Peer filtering is a transport boundary, not authentication. Before each
-//! request is sent, the command client discards every datagram already queued
-//! on its socket, so a reply that arrived after an earlier transaction's
-//! deadline cannot answer the next request. A late datagram from the
-//! configured peer that arrives *after* that drain still cannot be
-//! distinguished from a fresh response, because NatNet command replies have no
-//! transaction identifier. Callers must treat a failed write exchange as an
-//! unknown remote outcome and decide how to reconcile it from their own
-//! application state.
+//! Start with [`CommandClient::connect_handshake`], then use
+//! [`CommandClient::exchange`] for read-only requests; `examples/probe.rs`
+//! shows both steps.
+//!
+//! **Not authenticated.** Peer filtering is hygiene only. Queued datagrams are
+//! drained before each request, but NatNet replies carry no transaction id, so
+//! a late reply arriving after the drain can still be mistaken for the current
+//! one. Treat a failed write as an unknown remote outcome and reconcile it
+//! from your own application state.
 
 use std::fmt;
 use std::io;
