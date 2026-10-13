@@ -27,10 +27,6 @@ serde = ["dep:serde"]
 nalgebra = ["dep:nalgebra"]
 
 [[example]]
-name = "imagery_dump"
-required-features = ["imagery", "net"]
-
-[[example]]
 name = "probe"
 required-features = ["net"]
 test = true
