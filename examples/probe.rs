@@ -3,8 +3,9 @@
 //! server and local interface IPv4 addresses:
 //!
 //! ```text
-//! cargo run --features net --example probe -- --server 192.168.1.10
-//! cargo run --features net --example probe -- --server 192.168.1.10 --interface 192.168.1.20 --frames 20
+//! cargo run --example probe
+//! cargo run --example probe -- --server 192.168.1.10
+//! cargo run --example probe -- --server 192.168.1.10 --interface 192.168.1.20 --frames 20
 //! ```
 //!
 //! Expected output starts with `server:` and `model:` lines, followed by one

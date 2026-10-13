@@ -20,10 +20,7 @@ include = [
 ]
 
 [features]
-default = []
-# Std-UDP clients over the sans-io core: receive-only unicast/multicast data,
-# validated command exchanges, and an explicitly unrestricted raw client.
-# Local interfaces and multicast joins are explicit.
+default = ["net"]
 net = []
 imagery = []
 serde = ["dep:serde"]
