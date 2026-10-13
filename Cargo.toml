@@ -4,17 +4,16 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "Apache-2.0 OR MIT"
-description = "Sans-io OptiTrack NatNet protocol core: checked parse/serialize, version-aware SERVERINFO, MODELDEF and FrameOfData, with optional std-UDP clients."
+description = "OptiTrack NatNet protocol"
 repository = "https://github.com/AndrejOrsula/natnet"
 readme = "README.md"
-keywords = ["natnet", "optitrack", "motive", "mocap", "sans-io"]
+keywords = ["natnet", "optitrack", "motive", "mocap"]
 categories = ["parser-implementations", "network-programming"]
 include = [
     "/src",
     "/examples",
     "/tests",
     "/README.md",
-    "/CHANGELOG.md",
     "/LICENSE-APACHE",
     "/LICENSE-MIT",
 ]
