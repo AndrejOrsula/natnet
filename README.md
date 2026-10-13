@@ -1,6 +1,6 @@
 # 🦀 natnet
 
-[![CI](https://github.com/AndrejOrsula/natnet/actions/workflows/rust.yml/badge.svg)](https://github.com/AndrejOrsula/natnet/actions/workflows/rust.yml)
+[![CI](https://github.com/AndrejOrsula/natnet/actions/workflows/ci.yml/badge.svg)](https://github.com/AndrejOrsula/natnet/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/AndrejOrsula/natnet/branch/main/graph/badge.svg)](https://codecov.io/gh/AndrejOrsula/natnet/tree/main)
 
 > Rust implementation of the OptiTrack **NatNet** protocol used by Motive
