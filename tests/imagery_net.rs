@@ -949,7 +949,15 @@ fn the_worst_declared_length_past_the_deadline_stays_within_a_fixed_budget() {
 }
 
 /// A single post-deadline read cannot complete a record larger than the receive queue.
+///
+/// The premise needs Linux loopback: a receive queue smaller than the record,
+/// and `peek` reporting all of it. macOS can queue the whole record, and
+/// Windows `peek` can report less than is queued.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs Linux loopback queue sizing and peek semantics"
+)]
 fn a_record_too_long_for_the_receive_queue_is_not_completed_past_its_deadline() {
     const REPS: usize = 5;
     for total in [256 * 1024usize, 1024 * 1024, 2 * 1024 * 1024] {
