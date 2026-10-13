@@ -134,12 +134,19 @@ fn multicast_uses_selected_interface_and_receives_loopback_delivery() {
         .set_multicast_loop_v4(true)
         .expect("enable local multicast loopback");
     sender.set_multicast_ttl_v4(1).expect("set multicast TTL");
-    sender
-        .send_to(
-            b"natnet-multicast",
-            SocketAddrV4::new(MULTICAST_GROUP, port),
-        )
-        .expect("send selected-interface multicast datagram");
+    // macOS routes the group through the default interface, whose address a
+    // loopback-bound sender cannot use, and refuses the send.
+    match sender.send_to(
+        b"natnet-multicast",
+        SocketAddrV4::new(MULTICAST_GROUP, port),
+    ) {
+        Ok(_) => {}
+        Err(err) if multicast_unavailable(&err) => {
+            eprintln!("skipping loopback multicast evidence: {err}");
+            return;
+        }
+        Err(err) => panic!("send selected-interface multicast datagram: {err}"),
+    }
 
     let mut buf = [0u8; 64];
     let (len, source) = client
