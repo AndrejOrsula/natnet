@@ -1,14 +1,4 @@
-/target
-**/*.rs.bk
-Cargo.lock.bak
-
-# Real captures never live here; only synthetic, spec-derived fixtures are
-# committed to this repository.
 *.aucap
 *.natnet
-/captures/
-/fuzz/target/
-/fuzz/Cargo.lock
-/fuzz/corpus/
-/fuzz/artifacts/
-/fuzz/coverage/
+captures
+target
