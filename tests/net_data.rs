@@ -171,7 +171,8 @@ fn a_datagram_filling_a_short_buffer_is_reported_as_possibly_truncated() {
     let client_addr = client.local_addr().expect("client address");
     let sender = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind sender");
 
-    // 100 bytes into a 64-byte buffer: the OS truncates it to exactly 64.
+    // 100 bytes into a 64-byte buffer: the OS truncates it to exactly 64, or
+    // Windows fails the receive; either way it is reported as InvalidData.
     sender.send_to(&[7u8; 100], client_addr).expect("send long");
     let mut short = [0u8; 64];
     let err = client
@@ -183,9 +184,24 @@ fn a_datagram_filling_a_short_buffer_is_reported_as_possibly_truncated() {
     sender.send_to(&[8u8; 63], client_addr).expect("send short");
     let (len, _) = client.recv(&mut short).expect("short datagram");
     assert_eq!(len, 63);
+}
 
-    // At MIN_DATA_BUFFER, even a maximal IPv4 datagram that fills the buffer
-    // exactly is complete by construction.
+/// At MIN_DATA_BUFFER, even a maximal IPv4 datagram that fills the buffer
+/// exactly is complete by construction.
+#[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS refuses UDP sends above net.inet.udp.maxdgram (9216 bytes by default)"
+)]
+fn a_maximal_ipv4_datagram_filling_min_data_buffer_is_complete() {
+    assert_eq!(MIN_DATA_BUFFER, MAX_IPV4_UDP_PAYLOAD);
+    let client = DataClient::bind_unicast(LOOPBACK, 0).expect("bind data client");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    let client_addr = client.local_addr().expect("client address");
+    let sender = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind sender");
+
     sender
         .send_to(&vec![9u8; MAX_IPV4_UDP_PAYLOAD], client_addr)
         .expect("send maximal IPv4 datagram");

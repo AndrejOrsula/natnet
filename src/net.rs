@@ -42,6 +42,10 @@ pub const MAX_IPV4_UDP_PAYLOAD: usize = 65_507;
 /// exactly may have been truncated and is reported as an error.
 pub const MIN_DATA_BUFFER: usize = MAX_IPV4_UDP_PAYLOAD;
 
+/// Winsock's `WSAEMSGSIZE`: a datagram was longer than the receive buffer and was truncated.
+#[cfg(windows)]
+const WSAEMSGSIZE: i32 = 10_040;
+
 /// Response for an unsupported NatNet command request. [`CommandClient`] returns
 /// [`io::ErrorKind::Unsupported`] when it receives this reply.
 pub use crate::message::NAT_UNRECOGNIZED_REQUEST;
@@ -114,11 +118,25 @@ impl DataClient {
     /// case is returned as an error rather than as possibly partial bytes.
     /// # Errors
     /// Returns [`io::ErrorKind::InvalidData`] when the received datagram fills a buffer shorter
-    /// than [`MIN_DATA_BUFFER`] (the datagram is consumed and cannot be recovered; retry with a
-    /// larger buffer for the next one). Otherwise returns the operating-system receive error,
-    /// including `WouldBlock` or `TimedOut` when configured by the caller.
+    /// than [`MIN_DATA_BUFFER`] or, on Windows, is reported as truncated (the datagram is
+    /// consumed and cannot be recovered; retry with a larger buffer for the next one). Otherwise
+    /// returns the operating-system receive error, including `WouldBlock` or `TimedOut` when
+    /// configured by the caller.
     pub fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let (received, source) = self.socket.recv_from(buf)?;
+        let (received, source) = match self.socket.recv_from(buf) {
+            Ok(received) => received,
+            // Windows fails a receive that truncates the datagram instead of
+            // returning the length of the bytes that fit.
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(WSAEMSGSIZE) => {
+                return Err(invalid_data(format_args!(
+                    "datagram was truncated to the {}-byte receive buffer; use a buffer of at \
+                     least MIN_DATA_BUFFER ({MIN_DATA_BUFFER}) bytes",
+                    buf.len()
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         if received == buf.len() && buf.len() < MIN_DATA_BUFFER {
             return Err(invalid_data(format_args!(
                 "datagram from {source} filled the {received}-byte receive buffer and may be \

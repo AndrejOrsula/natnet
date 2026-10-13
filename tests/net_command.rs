@@ -329,8 +329,13 @@ fn typed_property_exchange_uses_an_owned_full_reply() {
     assert_eq!(CommandResponse::parse_value(&reply).unwrap(), "1");
 }
 
+/// Sending the maximal request needs an OS that accepts a 65 507-byte UDP send by default.
 #[test]
-fn exchange_pins_the_ipv4_udp_payload_boundary_before_socket_io() {
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS refuses UDP sends above net.inet.udp.maxdgram (9216 bytes by default)"
+)]
+fn exchange_sends_a_request_at_the_ipv4_udp_payload_limit() {
     assert_eq!(MAX_IPV4_UDP_PAYLOAD, 65_507);
     let server = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind peer");
     let server_addr = v4(server.local_addr().expect("peer address"));
@@ -344,14 +349,20 @@ fn exchange_pins_the_ipv4_udp_payload_boundary_before_socket_io() {
         server
             .send_to(&CommandResponse::value_datagram("1"), source)
             .expect("send max-request reply");
-        server
     });
 
     let mut client = CommandClient::bind(LOOPBACK, server_addr).expect("bind client");
     client
         .exchange(&at_limit, COMMAND_TIMEOUT)
         .expect("exactly max-sized IPv4 datagram is accepted");
-    let server = peer.join().expect("peer thread");
+    peer.join().expect("peer thread");
+}
+
+#[test]
+fn exchange_rejects_a_request_over_the_ipv4_udp_payload_limit_before_socket_io() {
+    let server = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("bind peer");
+    let server_addr = v4(server.local_addr().expect("peer address"));
+    let mut client = CommandClient::bind(LOOPBACK, server_addr).expect("bind client");
 
     let over_limit = property_request(65_489);
     assert_eq!(over_limit.as_bytes().len(), MAX_IPV4_UDP_PAYLOAD + 1);
